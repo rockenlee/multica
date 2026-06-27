@@ -27,6 +27,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -149,6 +150,11 @@ type Handler struct {
 	// UI consults IsConfigured() to decide whether to surface install
 	// entry points.
 	LarkAPIClient lark.APIClient
+	// IntegrationSecrets encrypts user-provided third-party credentials
+	// for the generic integration module. Nil means the deployment has
+	// not configured MULTICA_INTEGRATION_SECRET_KEY; credential writes
+	// return 503, but read-only integration state remains available.
+	IntegrationSecrets *secretbox.Box
 	// LarkHub owns the per-installation supervisor goroutines that
 	// hold the §4.4 WS lease and run the EventConnector. Nil only
 	// when the master at-rest key (MULTICA_LARK_SECRET_KEY) is unset.

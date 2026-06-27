@@ -91,6 +91,36 @@ var projectResourceRemoveCmd = &cobra.Command{
 	RunE:  runProjectResourceRemove,
 }
 
+var projectResourceFetchCmd = &cobra.Command{
+	Use:   "fetch <project-id> <resource-id>",
+	Short: "Fetch content from a resource (gitlab_repo files/content, zentao_project info, feishu_drive files)",
+	Long:  "Fetches real content from an attached resource so an agent can read it. With --path, returns a specific file's content (gitlab_repo).",
+	Args:  exactArgs(2),
+	RunE:  runProjectResourceFetch,
+}
+
+func runProjectResourceFetch(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	endpoint := "/api/projects/" + projectRef.ID + "/resources/" + args[1] + "/content"
+	if path, _ := cmd.Flags().GetString("path"); path != "" {
+		endpoint += "?path=" + url.QueryEscape(path)
+	}
+	var result map[string]any
+	if err := client.GetJSON(ctx, endpoint, &result); err != nil {
+		return fmt.Errorf("fetch resource content: %w", err)
+	}
+	return cli.PrintJSON(os.Stdout, result)
+}
+
 var validProjectStatuses = []string{
 	"planned", "in_progress", "paused", "completed", "cancelled",
 }
@@ -120,6 +150,8 @@ func init() {
 	projectResourceCmd.AddCommand(projectResourceAddCmd)
 	projectResourceCmd.AddCommand(projectResourceUpdateCmd)
 	projectResourceCmd.AddCommand(projectResourceRemoveCmd)
+	projectResourceCmd.AddCommand(projectResourceFetchCmd)
+	projectResourceFetchCmd.Flags().String("path", "", "Specific file path to read (gitlab_repo)")
 
 	// project list
 	projectListCmd.Flags().String("output", "table", "Output format: table or json")

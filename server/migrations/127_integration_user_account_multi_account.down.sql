@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_integration_user_account_connection_user_account;
+
+DROP INDEX IF EXISTS idx_integration_user_account_connection;

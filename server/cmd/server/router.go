@@ -35,6 +35,7 @@ import (
 
 var defaultOrigins = []string{
 	"http://localhost:3000", // Next.js dev
+	"http://127.0.0.1:3000", // Next.js dev (loopback IP entrypoint)
 	"http://localhost:5173", // electron-vite dev
 	"http://localhost:5174", // electron-vite dev (fallback port)
 }
@@ -357,6 +358,17 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	} else {
 		slog.Info("lark integration disabled (MULTICA_LARK_SECRET_KEY not set)")
 	}
+	if integrationKey, err := secretbox.LoadKey("MULTICA_INTEGRATION_SECRET_KEY"); err == nil {
+		box, err := secretbox.New(integrationKey)
+		if err != nil {
+			slog.Error("integration module: secretbox.New failed; credential writes disabled", "error", err)
+		} else {
+			h.IntegrationSecrets = box
+			slog.Info("integration module credential encryption enabled")
+		}
+	} else {
+		slog.Info("integration module credential encryption disabled (MULTICA_INTEGRATION_SECRET_KEY not set)")
+	}
 	if opts.HeartbeatScheduler != nil {
 		h.HeartbeatScheduler = opts.HeartbeatScheduler
 	}
@@ -490,6 +502,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// only forward the bytes + the Stripe-Signature header; see
 	// HandleCloudBillingStripeWebhook for the rationale).
 	r.Post("/api/webhooks/stripe", h.HandleCloudBillingStripeWebhook)
+	// Feishu user OAuth callback (no Multica auth — the browser is redirected
+	// here by Feishu with ?code=&state=; the signed state carries the
+	// workspace/connection/user the token belongs to).
+	r.Get("/api/integrations/feishu/oauth/callback", h.FeishuOAuthCallback)
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
@@ -574,6 +590,17 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
+					r.Get("/resources", h.ListWorkspaceResources)
+					r.Post("/resources", h.CreateWorkspaceResource)
+					r.Delete("/resources/{resourceId}", h.DeleteWorkspaceResource)
+					r.Get("/integrations", h.ListIntegrations)
+					r.Put("/integrations/connections/{connectionId}/account", h.UpsertIntegrationUserAccount)
+					r.Delete("/integrations/connections/{connectionId}/account", h.DeleteIntegrationUserAccount)
+					r.Delete("/integrations/accounts/{accountId}", h.DeleteIntegrationUserAccountByID)
+					r.Put("/integrations/issue-sync/{provider}", h.UpsertIntegrationIssueSyncSetting)
+					r.Post("/integrations/connections/{connectionId}/issues/inbound", h.SyncInboundIntegrationIssue)
+					r.Get("/integrations/connections/{connectionId}/feishu/oauth/start", h.FeishuOAuthStart)
+					r.Post("/integrations/connections/{connectionId}/zentao/login", h.ZenTaoLogin)
 					// Listing GitHub installations is member-visible so the
 					// integrations tab no longer renders blank for non-admins;
 					// the handler strips the management handle and adds a
@@ -601,6 +628,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Patch("/runtime-profiles/{profileId}", h.UpdateRuntimeProfile)
 					r.Put("/runtime-profiles/{profileId}", h.UpdateRuntimeProfile)
 					r.Delete("/runtime-profiles/{profileId}", h.DeleteRuntimeProfile)
+					r.Post("/integrations/connections", h.CreateIntegrationConnection)
+					r.Patch("/integrations/connections/{connectionId}", h.UpdateIntegrationConnection)
+					r.Delete("/integrations/connections/{connectionId}", h.DeleteIntegrationConnection)
+					r.Put("/integrations/connections/{connectionId}/project-bindings/{projectId}", h.UpsertIntegrationProjectBinding)
 				})
 				// Owner-only access
 				r.With(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner")).Delete("/", h.DeleteWorkspace)
@@ -740,6 +771,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/metadata", h.ListIssueMetadata)
 					r.Put("/metadata/{key}", h.SetIssueMetadataKey)
 					r.Delete("/metadata/{key}", h.DeleteIssueMetadataKey)
+					r.Post("/sync-out", h.RequestIssueOutboundSync)
 					r.Get("/pull-requests", h.ListPullRequestsForIssue)
 				})
 			})
@@ -771,6 +803,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)
 					r.Delete("/resources/{resourceId}", h.DeleteProjectResource)
+					r.Get("/resources/{resourceId}/content", h.FetchProjectResourceContent)
 				})
 			})
 

@@ -366,6 +366,85 @@ type InboxItem struct {
 	Details       []byte             `json:"details"`
 }
 
+type IntegrationConnection struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	Provider        string             `json:"provider"`
+	Name            string             `json:"name"`
+	BaseUrl         pgtype.Text        `json:"base_url"`
+	Config          []byte             `json:"config"`
+	Status          string             `json:"status"`
+	SyncEnabledAt   pgtype.Timestamptz `json:"sync_enabled_at"`
+	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type IntegrationIssueSyncSetting struct {
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	UserID            pgtype.UUID        `json:"user_id"`
+	Provider          string             `json:"provider"`
+	InboundEnabledAt  pgtype.Timestamptz `json:"inbound_enabled_at"`
+	OutboundEnabledAt pgtype.Timestamptz `json:"outbound_enabled_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type IntegrationProjectBinding struct {
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	ProjectID              pgtype.UUID        `json:"project_id"`
+	ConnectionID           pgtype.UUID        `json:"connection_id"`
+	ExternalRef            []byte             `json:"external_ref"`
+	InboundEnabledAt       pgtype.Timestamptz `json:"inbound_enabled_at"`
+	OutboundEnabledAt      pgtype.Timestamptz `json:"outbound_enabled_at"`
+	IssueSyncEnabledAt     pgtype.Timestamptz `json:"issue_sync_enabled_at"`
+	KnowledgeSyncEnabledAt pgtype.Timestamptz `json:"knowledge_sync_enabled_at"`
+	CreatedByUserID        pgtype.UUID        `json:"created_by_user_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
+type IntegrationSyncEvent struct {
+	ID           pgtype.UUID        `json:"id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	ConnectionID pgtype.UUID        `json:"connection_id"`
+	Provider     string             `json:"provider"`
+	Direction    string             `json:"direction"`
+	ObjectType   string             `json:"object_type"`
+	ObjectID     pgtype.Text        `json:"object_id"`
+	ExternalID   pgtype.Text        `json:"external_id"`
+	ExternalUrl  pgtype.Text        `json:"external_url"`
+	ProjectID    pgtype.UUID        `json:"project_id"`
+	Status       string             `json:"status"`
+	Message      pgtype.Text        `json:"message"`
+	Error        pgtype.Text        `json:"error"`
+	Metadata     []byte             `json:"metadata"`
+	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type IntegrationUserAccount struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	UserID              pgtype.UUID        `json:"user_id"`
+	AccountKey          string             `json:"account_key"`
+	AccountName         string             `json:"account_name"`
+	ExternalUserID      pgtype.Text        `json:"external_user_id"`
+	ExternalUsername    pgtype.Text        `json:"external_username"`
+	CredentialEncrypted []byte             `json:"credential_encrypted"`
+	Scopes              []byte             `json:"scopes"`
+	Config              []byte             `json:"config"`
+	Status              string             `json:"status"`
+	SyncEnabledAt       pgtype.Timestamptz `json:"sync_enabled_at"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt          pgtype.Timestamptz `json:"last_used_at"`
+	LastError           pgtype.Text        `json:"last_error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Issue struct {
 	ID                 pgtype.UUID        `json:"id"`
 	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
@@ -820,4 +899,15 @@ type WorkspaceInvitation struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+type WorkspaceResource struct {
+	ID           pgtype.UUID        `json:"id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	ResourceType string             `json:"resource_type"`
+	ResourceRef  []byte             `json:"resource_ref"`
+	Label        pgtype.Text        `json:"label"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
 }

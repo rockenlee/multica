@@ -569,7 +569,9 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 				fmt.Fprintf(&b, "- %s\n", formatProjectResource(r))
 			}
 			b.WriteString("\nResources are pointers — open them only when relevant to the task. ")
-			b.WriteString("For `github_repo` resources, use `multica repo checkout <url>` to fetch the code. Add `--ref <branch-or-sha>` when a task or handoff names an exact revision.\n\n")
+			b.WriteString("For `github_repo` resources, use `multica repo checkout <url>` to fetch the code. Add `--ref <branch-or-sha>` when a task or handoff names an exact revision. ")
+			b.WriteString("For `gitlab_repo` and `zentao_project` resources, use `multica project resource fetch <project-id> <resource-id>` to list their files/content, and add `--path <file>` for a specific file. ")
+			b.WriteString("For `feishu_drive` / `feishu_wiki` resources (user-owned Drive content), use `lark-cli drive +pull --as user --folder-token <token>` to mirror the folder locally, then read the files. Project and resource ids (and folder tokens) are in `.multica/project/resources.json`.\n\n")
 		} else {
 			b.WriteString("This project has no resources attached yet.\n\n")
 		}

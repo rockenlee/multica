@@ -1066,6 +1066,15 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 
 	h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, suppressAgentIDs)
 
+	// Controlled outbound: a comment on a MIRRORED issue syncs to its external
+	// source (async, hybrid-gated inside the helper). Native issues and /note
+	// internal comments are skipped. Identity = the commenter's own credential.
+	if !isNoteComment(req.Content) {
+		if changer, perr := parseUUIDLoose(userID); perr == nil {
+			go h.pushIssueCommentOutbound(issue, req.Content, changer)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, resp)
 }
 

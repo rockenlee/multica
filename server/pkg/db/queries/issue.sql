@@ -118,6 +118,17 @@ INSERT INTO issue (
     sqlc.narg('origin_type'), sqlc.narg('origin_id')
 ) RETURNING *;
 
+-- name: CreateIssueExternalMirror :one
+INSERT INTO issue (
+    workspace_id, title, description, status, priority,
+    assignee_type, assignee_id, creator_type, creator_id,
+    parent_issue_id, position, start_date, due_date, number, project_id,
+    metadata
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+    $16
+) RETURNING *;
+
 -- name: LockIssueDuplicateKey :exec
 SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
 
@@ -260,6 +271,25 @@ WHERE workspace_id = $1
   AND origin_type = $2
   AND origin_id = $3
 LIMIT 1;
+
+-- name: GetIssueByExternalSource :one
+SELECT * FROM issue
+WHERE workspace_id = $1
+  AND metadata @> jsonb_build_object(
+    'source_system', sqlc.arg('source_system')::text,
+    'source_id', sqlc.arg('source_id')::text
+  )
+LIMIT 1;
+
+-- name: UpdateIssueExternalMirror :one
+UPDATE issue SET
+    title = $3,
+    description = $4,
+    project_id = COALESCE(sqlc.narg('project_id')::uuid, project_id),
+    metadata = $5,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING *;
 
 -- name: CountCreatedIssueAssignees :many
 -- Count assignees on issues created by a specific user.

@@ -246,6 +246,86 @@ func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue
 	return i, err
 }
 
+const createIssueExternalMirror = `-- name: CreateIssueExternalMirror :one
+INSERT INTO issue (
+    workspace_id, title, description, status, priority,
+    assignee_type, assignee_id, creator_type, creator_id,
+    parent_issue_id, position, start_date, due_date, number, project_id,
+    metadata
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+    $16
+) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata
+`
+
+type CreateIssueExternalMirrorParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	Title         string      `json:"title"`
+	Description   pgtype.Text `json:"description"`
+	Status        string      `json:"status"`
+	Priority      string      `json:"priority"`
+	AssigneeType  pgtype.Text `json:"assignee_type"`
+	AssigneeID    pgtype.UUID `json:"assignee_id"`
+	CreatorType   string      `json:"creator_type"`
+	CreatorID     pgtype.UUID `json:"creator_id"`
+	ParentIssueID pgtype.UUID `json:"parent_issue_id"`
+	Position      float64     `json:"position"`
+	StartDate     pgtype.Date `json:"start_date"`
+	DueDate       pgtype.Date `json:"due_date"`
+	Number        int32       `json:"number"`
+	ProjectID     pgtype.UUID `json:"project_id"`
+	Metadata      []byte      `json:"metadata"`
+}
+
+func (q *Queries) CreateIssueExternalMirror(ctx context.Context, arg CreateIssueExternalMirrorParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, createIssueExternalMirror,
+		arg.WorkspaceID,
+		arg.Title,
+		arg.Description,
+		arg.Status,
+		arg.Priority,
+		arg.AssigneeType,
+		arg.AssigneeID,
+		arg.CreatorType,
+		arg.CreatorID,
+		arg.ParentIssueID,
+		arg.Position,
+		arg.StartDate,
+		arg.DueDate,
+		arg.Number,
+		arg.ProjectID,
+		arg.Metadata,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const createIssueWithOrigin = `-- name: CreateIssueWithOrigin :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -457,6 +537,54 @@ WHERE id = $1
 
 func (q *Queries) GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error) {
 	row := q.db.QueryRow(ctx, getIssue, id)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getIssueByExternalSource = `-- name: GetIssueByExternalSource :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata FROM issue
+WHERE workspace_id = $1
+  AND metadata @> jsonb_build_object(
+    'source_system', $2::text,
+    'source_id', $3::text
+  )
+LIMIT 1
+`
+
+type GetIssueByExternalSourceParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	SourceSystem string      `json:"source_system"`
+	SourceID     string      `json:"source_id"`
+}
+
+func (q *Queries) GetIssueByExternalSource(ctx context.Context, arg GetIssueByExternalSourceParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, getIssueByExternalSource, arg.WorkspaceID, arg.SourceSystem, arg.SourceID)
 	var i Issue
 	err := row.Scan(
 		&i.ID,
@@ -1165,6 +1293,65 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 		arg.StartDate,
 		arg.DueDate,
 		arg.ParentIssueID,
+		arg.ProjectID,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const updateIssueExternalMirror = `-- name: UpdateIssueExternalMirror :one
+UPDATE issue SET
+    title = $3,
+    description = $4,
+    project_id = COALESCE($6::uuid, project_id),
+    metadata = $5,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata
+`
+
+type UpdateIssueExternalMirrorParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Title       string      `json:"title"`
+	Description pgtype.Text `json:"description"`
+	Metadata    []byte      `json:"metadata"`
+	ProjectID   pgtype.UUID `json:"project_id"`
+}
+
+func (q *Queries) UpdateIssueExternalMirror(ctx context.Context, arg UpdateIssueExternalMirrorParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueExternalMirror,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.Title,
+		arg.Description,
+		arg.Metadata,
 		arg.ProjectID,
 	)
 	var i Issue

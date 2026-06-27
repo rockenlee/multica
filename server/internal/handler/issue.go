@@ -2493,6 +2493,14 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	assigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil) &&
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := req.Status != nil && prevIssue.Status != issue.Status
+	// Controlled outbound: when a MIRRORED issue's status changes, sync it back
+	// to its external source (async, hybrid-gated inside the helper; native
+	// issues are ignored). Identity = the changer's own provider credential.
+	if statusChanged {
+		if changer, perr := parseUUIDLoose(userID); perr == nil {
+			go h.pushIssueStatusOutbound(issue, issue.Status, changer)
+		}
+	}
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
 	descriptionChanged := req.Description != nil && textToPtr(prevIssue.Description) != resp.Description
 	titleChanged := req.Title != nil && prevIssue.Title != issue.Title

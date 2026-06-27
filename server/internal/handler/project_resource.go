@@ -74,14 +74,29 @@ func validateAndNormalizeResourceRef(resourceType string, ref json.RawMessage) (
 	switch resourceType {
 	case "github_repo":
 		return validateGithubRepoRef(ref)
+	case "gitlab_repo":
+		return validateGitLabRepoRef(ref)
 	case "local_directory":
 		return validateLocalDirectoryRef(ref)
+	case "feishu_drive":
+		return validateFeishuDriveRef(ref)
+	case "feishu_wiki":
+		return validateFeishuWikiRef(ref)
+	case "zentao_project":
+		return validateZenTaoProjectRef(ref)
+	case "zentao_product":
+		return validateZenTaoProductRef(ref)
 	default:
 		return nil, fmt.Errorf("unknown resource_type %q", resourceType)
 	}
 }
 
 type githubRepoRef struct {
+	URL               string `json:"url"`
+	DefaultBranchHint string `json:"default_branch_hint,omitempty"`
+}
+
+type gitLabRepoRef struct {
 	URL               string `json:"url"`
 	DefaultBranchHint string `json:"default_branch_hint,omitempty"`
 }
@@ -99,6 +114,144 @@ func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("github_repo: url must be a valid http(s) or ssh git URL")
 	}
 	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func validateGitLabRepoRef(ref json.RawMessage) (json.RawMessage, error) {
+	var payload gitLabRepoRef
+	if err := json.Unmarshal(ref, &payload); err != nil {
+		return nil, fmt.Errorf("invalid gitlab_repo payload: %w", err)
+	}
+	payload.URL = strings.TrimSpace(payload.URL)
+	if payload.URL == "" {
+		return nil, errors.New("gitlab_repo: url is required")
+	}
+	if !isValidGitRepoURL(payload.URL) {
+		return nil, errors.New("gitlab_repo: url must be a valid http(s) or ssh git URL")
+	}
+	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type feishuDriveRef struct {
+	DriveURL    string `json:"drive_url,omitempty"`
+	FolderToken string `json:"folder_token,omitempty"`
+	NodeToken   string `json:"node_token,omitempty"`
+	Label       string `json:"label,omitempty"`
+}
+
+func validateFeishuDriveRef(ref json.RawMessage) (json.RawMessage, error) {
+	var payload feishuDriveRef
+	if err := json.Unmarshal(ref, &payload); err != nil {
+		return nil, fmt.Errorf("invalid feishu_drive payload: %w", err)
+	}
+	payload.DriveURL = strings.TrimSpace(payload.DriveURL)
+	payload.FolderToken = strings.TrimSpace(payload.FolderToken)
+	payload.NodeToken = strings.TrimSpace(payload.NodeToken)
+	payload.Label = strings.TrimSpace(payload.Label)
+	if payload.DriveURL == "" && payload.FolderToken == "" && payload.NodeToken == "" {
+		return nil, errors.New("feishu_drive: drive_url, folder_token, or node_token is required")
+	}
+	if payload.DriveURL != "" && !isValidHTTPURL(payload.DriveURL) {
+		return nil, errors.New("feishu_drive: drive_url must be a valid http(s) URL")
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type feishuWikiRef struct {
+	WikiURL   string `json:"wiki_url,omitempty"`
+	SpaceID   string `json:"space_id,omitempty"`
+	NodeToken string `json:"node_token,omitempty"`
+	Label     string `json:"label,omitempty"`
+}
+
+func validateFeishuWikiRef(ref json.RawMessage) (json.RawMessage, error) {
+	var payload feishuWikiRef
+	if err := json.Unmarshal(ref, &payload); err != nil {
+		return nil, fmt.Errorf("invalid feishu_wiki payload: %w", err)
+	}
+	payload.WikiURL = strings.TrimSpace(payload.WikiURL)
+	payload.SpaceID = strings.TrimSpace(payload.SpaceID)
+	payload.NodeToken = strings.TrimSpace(payload.NodeToken)
+	payload.Label = strings.TrimSpace(payload.Label)
+	if payload.WikiURL == "" && payload.SpaceID == "" && payload.NodeToken == "" {
+		return nil, errors.New("feishu_wiki: wiki_url, space_id, or node_token is required")
+	}
+	if payload.WikiURL != "" && !isValidHTTPURL(payload.WikiURL) {
+		return nil, errors.New("feishu_wiki: wiki_url must be a valid http(s) URL")
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type zenTaoProjectRef struct {
+	ProjectID  string `json:"project_id,omitempty"`
+	ProjectKey string `json:"project_key,omitempty"`
+	ProductID  string `json:"product_id,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Label      string `json:"label,omitempty"`
+}
+
+func validateZenTaoProjectRef(ref json.RawMessage) (json.RawMessage, error) {
+	var payload zenTaoProjectRef
+	if err := json.Unmarshal(ref, &payload); err != nil {
+		return nil, fmt.Errorf("invalid zentao_project payload: %w", err)
+	}
+	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
+	payload.ProjectKey = strings.TrimSpace(payload.ProjectKey)
+	payload.ProductID = strings.TrimSpace(payload.ProductID)
+	payload.URL = strings.TrimSpace(payload.URL)
+	payload.Label = strings.TrimSpace(payload.Label)
+	if payload.ProjectID == "" && payload.ProjectKey == "" && payload.URL == "" {
+		return nil, errors.New("zentao_project: project_id, project_key, or url is required")
+	}
+	if payload.URL != "" && !isValidHTTPURL(payload.URL) {
+		return nil, errors.New("zentao_project: url must be a valid http(s) URL")
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type zenTaoProductRef struct {
+	ProductID  string `json:"product_id,omitempty"`
+	ProductKey string `json:"product_key,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Label      string `json:"label,omitempty"`
+}
+
+func validateZenTaoProductRef(ref json.RawMessage) (json.RawMessage, error) {
+	var payload zenTaoProductRef
+	if err := json.Unmarshal(ref, &payload); err != nil {
+		return nil, fmt.Errorf("invalid zentao_product payload: %w", err)
+	}
+	payload.ProductID = strings.TrimSpace(payload.ProductID)
+	payload.ProductKey = strings.TrimSpace(payload.ProductKey)
+	payload.URL = strings.TrimSpace(payload.URL)
+	payload.Label = strings.TrimSpace(payload.Label)
+	if payload.ProductID == "" && payload.ProductKey == "" && payload.URL == "" {
+		return nil, errors.New("zentao_product: product_id, product_key, or url is required")
+	}
+	if payload.URL != "" && !isValidHTTPURL(payload.URL) {
+		return nil, errors.New("zentao_product: url must be a valid http(s) URL")
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -209,6 +362,14 @@ func isValidGitRepoURL(s string) bool {
 		return false
 	}
 	return true
+}
+
+func isValidHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
 }
 
 // loadProjectForResource resolves the project, enforces workspace ownership,

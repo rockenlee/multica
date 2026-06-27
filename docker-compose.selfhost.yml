@@ -111,6 +111,9 @@ services:
       MULTICA_LARK_SECRET_KEY: ${MULTICA_LARK_SECRET_KEY:-}
       MULTICA_LARK_HTTP_BASE_URL: ${MULTICA_LARK_HTTP_BASE_URL:-}
       MULTICA_LARK_CALLBACK_BASE_URL: ${MULTICA_LARK_CALLBACK_BASE_URL:-}
+      # Generic integration module credential encryption. Required before
+      # members can save GitLab / ZenTao / Feishu personal tokens.
+      MULTICA_INTEGRATION_SECRET_KEY: ${MULTICA_INTEGRATION_SECRET_KEY:-}
     restart: unless-stopped
 
   frontend:

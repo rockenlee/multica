@@ -1,0 +1,17 @@
+# Dev-only override: give the backend (and its agent runtime) access to the
+# corporate VPN subnets + public internet by joining the docker-easyconnect
+# network. Without this the backend container is on an isolated bridge and
+# cannot reach gitlab.hbc.tech / chandao.huangbaoche.com / open.feishu.cn,
+# which blocks outbound issue sync and resource content fetch.
+#
+# Usage: add `-f docker-compose.vpn.override.yml` to the compose invocation.
+services:
+  backend:
+    networks:
+      - default
+      - easyconnect
+
+networks:
+  easyconnect:
+    external: true
+    name: docker-easyconnect_default
