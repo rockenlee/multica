@@ -76,8 +76,11 @@ import type {
   ListProjectsResponse,
   ProjectResource,
   CreateProjectResourceRequest,
+  CreateWorkspaceResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  WorkspaceResource,
+  ListWorkspaceResourcesResponse,
   Label,
   CreateLabelRequest,
   UpdateLabelRequest,
@@ -105,6 +108,16 @@ import type {
   GitHubPullRequest,
   ListGitHubInstallationsResponse,
   GitHubConnectResponse,
+  IssueOutboundSyncResponse,
+  IntegrationIssueSyncSetting,
+  ListIntegrationsResponse,
+  UpsertIntegrationConnectionRequest,
+  UpsertIntegrationIssueSyncSettingRequest,
+  UpsertIntegrationProjectBindingRequest,
+  UpsertIntegrationUserAccountRequest,
+  RequestIssueOutboundSyncRequest,
+  SyncInboundIntegrationIssueRequest,
+  SyncInboundIntegrationIssueResponse,
   ListLarkInstallationsResponse,
   BeginLarkInstallResponse,
   LarkInstallStatusResponse,
@@ -155,6 +168,8 @@ import {
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
+  EMPTY_ISSUE_OUTBOUND_SYNC_RESPONSE,
+  EMPTY_LIST_INTEGRATIONS_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
   EMPTY_SQUAD,
   EMPTY_SQUAD_LIST,
@@ -166,6 +181,9 @@ import {
   AppConfigSchema,
   type AppConfigResponse,
   GroupedIssuesResponseSchema,
+  IssueOutboundSyncResponseSchema,
+  IntegrationIssueSyncSettingSchema,
+  ListIntegrationsResponseSchema,
   ListAutopilotsResponseSchema,
   EMPTY_LIST_AUTOPILOTS_RESPONSE,
   ListIssuesResponseSchema,
@@ -1892,6 +1910,32 @@ export class ApiClient {
     });
   }
 
+  // Workspace resources
+  async listWorkspaceResources(
+    workspaceId: string,
+  ): Promise<ListWorkspaceResourcesResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/resources`);
+  }
+
+  async createWorkspaceResource(
+    workspaceId: string,
+    data: CreateWorkspaceResourceRequest,
+  ): Promise<WorkspaceResource> {
+    return this.fetch(`/api/workspaces/${workspaceId}/resources`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteWorkspaceResource(
+    workspaceId: string,
+    resourceId: string,
+  ): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/resources/${resourceId}`, {
+      method: "DELETE",
+    });
+  }
+
   // Labels
   async listLabels(): Promise<ListLabelsResponse> {
     return this.fetch(`/api/labels`);
@@ -2175,6 +2219,154 @@ export class ApiClient {
 
   async listIssuePullRequests(issueId: string): Promise<{ pull_requests: GitHubPullRequest[] }> {
     return this.fetch(`/api/issues/${issueId}/pull-requests`);
+  }
+
+  // Generic integration module
+  async listIntegrations(workspaceId: string): Promise<ListIntegrationsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/integrations`);
+    return parseWithFallback(
+      raw,
+      ListIntegrationsResponseSchema,
+      EMPTY_LIST_INTEGRATIONS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/integrations" },
+    );
+  }
+
+  async createIntegrationConnection(
+    workspaceId: string,
+    body: UpsertIntegrationConnectionRequest,
+  ): Promise<unknown> {
+    return this.fetch(`/api/workspaces/${workspaceId}/integrations/connections`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async updateIntegrationConnection(
+    workspaceId: string,
+    connectionId: string,
+    body: UpsertIntegrationConnectionRequest,
+  ): Promise<unknown> {
+    return this.fetch(`/api/workspaces/${workspaceId}/integrations/connections/${connectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteIntegrationConnection(workspaceId: string, connectionId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/integrations/connections/${connectionId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async upsertIntegrationUserAccount(
+    workspaceId: string,
+    connectionId: string,
+    body: UpsertIntegrationUserAccountRequest,
+  ): Promise<unknown> {
+    return this.fetch(`/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/account`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteIntegrationUserAccount(workspaceId: string, connectionId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/account`, {
+      method: "DELETE",
+    });
+  }
+
+  async deleteIntegrationUserAccountById(workspaceId: string, accountId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/integrations/accounts/${accountId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async startFeishuOAuth(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<{ authorize_url: string }> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/feishu/oauth/start`,
+    );
+  }
+
+  async zentaoLogin(
+    workspaceId: string,
+    connectionId: string,
+    body: { account: string; password: string; account_key?: string; account_name?: string },
+  ): Promise<{ ok: boolean; account_key: string }> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/zentao/login`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  }
+
+  async updateIntegrationIssueSyncSetting(
+    workspaceId: string,
+    provider: string,
+    body: UpsertIntegrationIssueSyncSettingRequest,
+  ): Promise<IntegrationIssueSyncSetting> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/integrations/issue-sync/${provider}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return parseWithFallback(
+      raw,
+      IntegrationIssueSyncSettingSchema,
+      {
+        workspace_id: workspaceId,
+        user_id: "",
+        provider,
+        inbound_enabled: body.inbound_enabled,
+        outbound_enabled: body.outbound_enabled,
+        created_at: "",
+        updated_at: "",
+      },
+      { endpoint: "PUT /api/workspaces/:id/integrations/issue-sync/:provider" },
+    );
+  }
+
+  async upsertIntegrationProjectBinding(
+    workspaceId: string,
+    connectionId: string,
+    projectId: string,
+    body: UpsertIntegrationProjectBindingRequest,
+  ): Promise<unknown> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/project-bindings/${projectId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    );
+  }
+
+  async syncInboundIntegrationIssue(
+    workspaceId: string,
+    connectionId: string,
+    body: SyncInboundIntegrationIssueRequest,
+  ): Promise<SyncInboundIntegrationIssueResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/integrations/connections/${connectionId}/issues/inbound`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async requestIssueOutboundSync(
+    issueId: string,
+    body: RequestIssueOutboundSyncRequest = {},
+  ): Promise<IssueOutboundSyncResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/sync-out`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return parseWithFallback(
+      raw,
+      IssueOutboundSyncResponseSchema,
+      { ...EMPTY_ISSUE_OUTBOUND_SYNC_RESPONSE, issue_id: issueId },
+      { endpoint: "POST /api/issues/:id/sync-out" },
+    );
   }
 
   // Lark integration

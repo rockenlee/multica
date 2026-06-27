@@ -39,6 +39,18 @@
     "view_swimlane_short": "Swimlane",
     "sort_manual": "Manual"
   },
+  "sync_settings": {
+    "trigger": "Sync Settings",
+    "title": "Issue sync settings",
+    "description": "Choose which external channels can bring issues into My Issues or receive issues you explicitly sync outward.",
+    "channel_column": "Channel",
+    "inbound_column": "Inbound",
+    "outbound_column": "Outbound",
+    "inbound_aria": "Enable inbound sync for {{provider}}",
+    "outbound_aria": "Enable outbound sync for {{provider}}",
+    "save_failed": "Failed to save issue sync settings",
+    "resource_hint": "Project resources provide the external target. If a project is attached to a matching resource and this channel is enabled, related issues can be synced here."
+  },
   "errors": {
     "move_failed": "Failed to move issue"
   }

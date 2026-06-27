@@ -1,5 +1,6 @@
 import type { Issue, IssueStatus, IssuePriority } from "@multica/core/types";
 import type { ActorFilterValue } from "@multica/core/issues/stores/view-store";
+import { getIssueSourceProvider, type IssueSyncProvider } from "@multica/core/issues";
 
 export interface IssueFilters {
   statusFilters: IssueStatus[];
@@ -16,6 +17,7 @@ export interface IssueFilters {
   // free of any data-fetching dependency.
   agentRunningFilter?: boolean;
   runningIssueIds?: ReadonlySet<string>;
+  sourceFilters?: IssueSyncProvider[];
 }
 
 /**
@@ -28,9 +30,10 @@ export interface IssueFilters {
  * - When both → show matching assignees + unassigned
  */
 export function filterIssues(issues: Issue[], filters: IssueFilters): Issue[] {
-  const { statusFilters, priorityFilters, assigneeFilters, includeNoAssignee, creatorFilters, projectFilters, includeNoProject, labelFilters, agentRunningFilter, runningIssueIds } = filters;
+  const { statusFilters, priorityFilters, assigneeFilters, includeNoAssignee, creatorFilters, projectFilters, includeNoProject, labelFilters, agentRunningFilter, runningIssueIds, sourceFilters = [] } = filters;
   const hasAssigneeFilter = assigneeFilters.length > 0 || includeNoAssignee;
   const hasProjectFilter = projectFilters.length > 0 || includeNoProject;
+  const hasSourceFilter = sourceFilters.length > 0;
   // Empty set passed without `agentRunningFilter` is a no-op. When the
   // filter is on but the set is missing/empty, hide everything — the
   // user opted into "only running" and there is nothing running.
@@ -39,6 +42,11 @@ export function filterIssues(issues: Issue[], filters: IssueFilters): Issue[] {
   return issues.filter((issue) => {
     if (applyAgentRunning && !(runningIssueIds?.has(issue.id) ?? false))
       return false;
+
+    if (hasSourceFilter) {
+      const source = getIssueSourceProvider(issue);
+      if (!source || !sourceFilters.includes(source)) return false;
+    }
 
     if (statusFilters.length > 0 && !statusFilters.includes(issue.status))
       return false;

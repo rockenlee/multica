@@ -38,6 +38,18 @@
     "view_swimlane_short": "スイムレーン",
     "sort_manual": "手動"
   },
+  "sync_settings": {
+    "trigger": "同期設定",
+    "title": "Issue 同期設定",
+    "description": "My Issues に取り込む外部チャンネルと、明示的に外部へ同期できるチャンネルを選択します。",
+    "channel_column": "チャンネル",
+    "inbound_column": "入站",
+    "outbound_column": "出站",
+    "inbound_aria": "{{provider}} の入站同期を有効化",
+    "outbound_aria": "{{provider}} の出站同期を有効化",
+    "save_failed": "Issue 同期設定の保存に失敗しました",
+    "resource_hint": "プロジェクトリソースが外部ターゲットを提供します。プロジェクトに対応チャンネルのリソースがあり、このチャンネルが有効な場合、関連 issue をここへ同期できます。"
+  },
   "errors": {
     "move_failed": "イシューを移動できませんでした"
   }

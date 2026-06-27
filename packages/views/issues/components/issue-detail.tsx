@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
+import { useStore } from "zustand";
 import { AppLink } from "../../navigation";
 import { useNavigation } from "../../navigation";
 import {
@@ -19,6 +20,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   Tag,
   Users,
 } from "lucide-react";
@@ -60,13 +62,16 @@ import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
 import { PullRequestList } from "./pull-request-list";
 import { useGitHubSettings } from "@multica/core/github";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useRecentContextStore } from "@multica/core/chat";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueAttachmentsOptions } from "@multica/core/issues/queries";
+import { issueKeys, issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueAttachmentsOptions } from "@multica/core/issues/queries";
+import { normalizeIssueSourceProvider } from "@multica/core/issues";
+import { myIssuesViewStore } from "@multica/core/issues/stores/my-issues-view-store";
+import { integrationKeys, integrationsOptions } from "@multica/core/integrations";
 import { projectDetailOptions } from "@multica/core/projects/queries";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { issueLabelsOptions } from "@multica/core/labels";
@@ -669,11 +674,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const router = useNavigation();
   const user = useAuthStore((s) => s.user);
   const paths = useWorkspacePaths();
+  const qc = useQueryClient();
+  const issueSyncSettings = useStore(myIssuesViewStore, (s) => s.syncSettings);
 
   // Issue navigation — read from TQ list cache
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const { data: integrations } = useQuery(integrationsOptions(wsId));
   // Workspace owners and admins moderate any comment authored by anyone
   // (mirrors backend `comment.go:507-512`). Computed here so per-comment
   // rendering doesn't have to re-derive it for every row.
@@ -712,6 +720,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [parentIssueOpen, setParentIssueOpen] = useState(true);
   const [pullRequestsOpen, setPullRequestsOpen] = useState(true);
+  const [externalSyncOpen, setExternalSyncOpen] = useState(true);
+  const [outboundSyncing, setOutboundSyncing] = useState(false);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [tokenUsageOpen, setTokenUsageOpen] = useState(true);
   const githubSettings = useGitHubSettings();
@@ -830,6 +840,74 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       return cached?.description != null ? cached : undefined;
     },
   });
+  const externalSourceSystem =
+    typeof issue?.metadata?.source_system === "string" ? issue.metadata.source_system : "";
+  const externalSourceId =
+    typeof issue?.metadata?.source_id === "string" ? issue.metadata.source_id : "";
+  const externalSourceUrl =
+    typeof issue?.metadata?.source_url === "string" ? issue.metadata.source_url : "";
+  const syncOutStatus =
+    typeof issue?.metadata?.sync_out_status === "string" ? issue.metadata.sync_out_status : "";
+  const eligibleOutboundBindings = useMemo(() => {
+    if (!issue?.project_id) return [];
+    const connections = integrations?.connections ?? [];
+    const bindings = integrations?.project_bindings ?? [];
+    return bindings
+      .filter(
+        (binding) =>
+          binding.project_id === issue.project_id &&
+          binding.outbound_enabled &&
+          binding.issue_sync_enabled,
+      )
+      .map((binding) => ({
+        binding,
+        connection: connections.find((connection) => connection.id === binding.connection_id) ?? null,
+      }))
+      .filter(
+        (entry) => {
+          const provider = normalizeIssueSourceProvider(entry.connection?.provider);
+          return (
+            entry.connection?.status === "active" &&
+            entry.connection?.sync_enabled === true &&
+            !!provider &&
+            issueSyncSettings[provider]?.outbound === true
+          );
+        },
+      );
+  }, [integrations?.connections, integrations?.project_bindings, issue?.project_id, issueSyncSettings]);
+  const outboundProviderSummary = eligibleOutboundBindings
+    .map((entry) => entry.connection?.name || entry.connection?.provider)
+    .filter(Boolean)
+    .join(", ");
+  const hasExternalSource = !!externalSourceSystem || !!externalSourceId;
+  const syncOutInFlight = syncOutStatus === "queued" || syncOutStatus === "processing";
+  const canRequestOutboundSync =
+    !!issue?.project_id &&
+    eligibleOutboundBindings.length > 0 &&
+    !hasExternalSource &&
+    !syncOutInFlight;
+
+  const handleRequestOutboundSync = useCallback(async () => {
+    if (!issue || !canRequestOutboundSync || outboundSyncing) return;
+    setOutboundSyncing(true);
+    try {
+      const result = await api.requestIssueOutboundSync(issue.id);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, issue.id) }),
+        qc.invalidateQueries({ queryKey: issueKeys.list(wsId) }),
+        qc.invalidateQueries({ queryKey: integrationKeys.list(wsId) }),
+      ]);
+      toast.success(result.message || t(($) => $.detail.external_sync_queued_toast));
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : t(($) => $.detail.external_sync_failed),
+      );
+    } finally {
+      setOutboundSyncing(false);
+    }
+  }, [canRequestOutboundSync, issue?.id, outboundSyncing, qc, t, wsId]);
 
   // Record recent visit
   const recordVisit = useRecentIssuesStore((s) => s.recordVisit);
@@ -1552,6 +1630,73 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${pullRequestsOpen ? "rotate-90" : ""}`} />
           </button>
           {pullRequestsOpen && <div className="pl-2"><PullRequestList issueId={id} /></div>}
+        </div>
+      )}
+
+      {(issue.project_id || hasExternalSource || syncOutStatus) && (
+        <div>
+          <button
+            type="button"
+            className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${externalSyncOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
+            onClick={() => setExternalSyncOpen(!externalSyncOpen)}
+          >
+            {t(($) => $.detail.section_external_sync)}
+            <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${externalSyncOpen ? "rotate-90" : ""}`} />
+          </button>
+          {externalSyncOpen && (
+            <div className="space-y-2 pl-2">
+              <p className="rounded-md border bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">
+                {hasExternalSource
+                  ? t(($) => $.detail.external_sync_linked, {
+                      source: externalSourceSystem || t(($) => $.detail.external_sync_external_source),
+                    })
+                  : syncOutInFlight
+                    ? t(($) => $.detail.external_sync_queued)
+                    : eligibleOutboundBindings.length > 0
+                      ? t(($) => $.detail.external_sync_ready, {
+                          providers: outboundProviderSummary,
+                        })
+                      : t(($) => $.detail.external_sync_missing_binding)}
+              </p>
+              {hasExternalSource && externalSourceId && (
+                <div className="rounded-md border bg-muted/20 px-2 py-1.5 text-xs">
+                  {externalSourceUrl ? (
+                    <a
+                      href={externalSourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="truncate text-foreground hover:underline"
+                    >
+                      {t(($) => $.detail.external_sync_source_id, {
+                        id: externalSourceId,
+                      })}
+                    </a>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      {t(($) => $.detail.external_sync_source_id, {
+                        id: externalSourceId,
+                      })}
+                    </span>
+                  )}
+                </div>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={!canRequestOutboundSync || outboundSyncing}
+                onClick={() => {
+                  void handleRequestOutboundSync();
+                }}
+              >
+                <RefreshCw className={`h-3 w-3 ${outboundSyncing ? "animate-spin" : ""}`} />
+                {outboundSyncing
+                  ? t(($) => $.detail.external_sync_requesting)
+                  : t(($) => $.detail.external_sync_request)}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

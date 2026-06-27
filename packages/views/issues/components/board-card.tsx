@@ -27,6 +27,7 @@ import { IssueActionsContextMenu } from "../actions";
 import { LabelChip } from "../../labels/label-chip";
 import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
 import { useT } from "../../i18n";
+import { IssueSourceBadge } from "./issue-source-badge";
 
 function formatDate(date: string): string {
   return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
@@ -185,6 +186,7 @@ export const BoardCardContent = memo(function BoardCardContent({
         <div className="flex items-center gap-1.5 min-w-0">
           {priorityIconNode}
           <p className="text-xs text-muted-foreground truncate">{issue.identifier}</p>
+          <IssueSourceBadge issue={issue} />
         </div>
         <IssueAgentActivityIndicator issueId={issue.id} />
       </div>

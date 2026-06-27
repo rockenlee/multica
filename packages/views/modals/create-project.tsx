@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { ChevronRight, FolderOpen, Maximize2, Minimize2, Search, X as XIcon, UserMinus } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { ChevronRight, Cloud, FolderOpen, Kanban, Maximize2, Minimize2, Search, X as XIcon, UserMinus } from "lucide-react";
 
 /**
  * GitHub mark — lucide-react v1 dropped brand icons, so we inline the
@@ -30,10 +30,15 @@ import {
   PROJECT_PRIORITY_ORDER,
 } from "@multica/core/projects/config";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useProviderEnablement } from "@multica/core/integrations";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useActorName } from "@multica/core/workspace/hooks";
-import type { ProjectStatus, ProjectPriority } from "@multica/core/types";
+import type {
+  ProjectStatus,
+  ProjectPriority,
+  CreateProjectResourceRequest,
+} from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@multica/ui/components/ui/dialog";
@@ -164,6 +169,45 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   const [localPickError, setLocalPickError] = useState<string | null>(null);
   const [localPicking, setLocalPicking] = useState(false);
 
+  // Resource pickers only surface providers the workspace has enabled. GitHub
+  // gates the repos picker (local directory stays available regardless, since
+  // it is not a Git feature); Feishu/ZenTao gate the NetDisk/ZenDao pickers.
+  const enablement = useProviderEnablement(wsId, workspace);
+  const canUseRepos = enablement.github;
+
+  // NetDisk = Feishu Drive folders, ZenDao = ZenTao projects. Staged as
+  // identifiers (URL or token/id) and turned into feishu_drive / zentao_project
+  // resources on submit, mirroring how repos are staged then attached.
+  const [selectedDrives, setSelectedDrives] = useState<string[]>([]);
+  const [drivePopoverOpen, setDrivePopoverOpen] = useState(false);
+  const [driveInput, setDriveInput] = useState("");
+  const [selectedZentao, setSelectedZentao] = useState<string[]>([]);
+  const [zentaoPopoverOpen, setZentaoPopoverOpen] = useState(false);
+  const [zentaoInput, setZentaoInput] = useState("");
+
+  const addDrive = () => {
+    const v = driveInput.trim();
+    if (!v) return;
+    setSelectedDrives((prev) => (prev.includes(v) ? prev : [...prev, v]));
+    setDriveInput("");
+  };
+  const removeDrive = (v: string) =>
+    setSelectedDrives((prev) => prev.filter((x) => x !== v));
+  const addZentao = () => {
+    const v = zentaoInput.trim();
+    if (!v) return;
+    setSelectedZentao((prev) => (prev.includes(v) ? prev : [...prev, v]));
+    setZentaoInput("");
+  };
+  const removeZentao = (v: string) =>
+    setSelectedZentao((prev) => prev.filter((x) => x !== v));
+
+  // With GitHub off the repos tab is hidden, so the source must fall back to
+  // the local directory (the only remaining source).
+  useEffect(() => {
+    if (!canUseRepos) setSourceMode("local");
+  }, [canUseRepos]);
+
   const handleSourceModeChange = (mode: "repos" | "local") => {
     setSourceMode(mode);
     setLocalPickError(null);
@@ -232,29 +276,43 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
     // `sourceMode` decides which side's stash gets persisted — the other
     // side is silently dropped, so repos picked then abandoned for local
     // mode don't leak into the project.
-    let resources:
-      | Array<{ resource_type: "github_repo" | "local_directory"; resource_ref: Record<string, unknown> }>
-      | undefined;
-    if (sourceMode === "repos" && selectedRepos.length > 0) {
-      resources = selectedRepos.map((url) => ({
-        resource_type: "github_repo" as const,
-        resource_ref: { url },
-      }));
+    const resources: CreateProjectResourceRequest[] = [];
+    if (canUseRepos && sourceMode === "repos" && selectedRepos.length > 0) {
+      resources.push(
+        ...selectedRepos.map((url) => ({
+          resource_type: "github_repo" as const,
+          resource_ref: { url },
+        })),
+      );
     } else if (
       sourceMode === "local" &&
       selectedLocalPath &&
       daemonStatus.daemonId
     ) {
-      resources = [
-        {
-          resource_type: "local_directory" as const,
-          resource_ref: {
-            local_path: selectedLocalPath,
-            daemon_id: daemonStatus.daemonId,
-            ...(selectedLocalLabel ? { label: selectedLocalLabel } : {}),
-          },
+      resources.push({
+        resource_type: "local_directory" as const,
+        resource_ref: {
+          local_path: selectedLocalPath,
+          daemon_id: daemonStatus.daemonId,
+          ...(selectedLocalLabel ? { label: selectedLocalLabel } : {}),
         },
-      ];
+      });
+    }
+    // NetDisk / ZenDao resources are additive — attached regardless of the
+    // GitHub-vs-local source choice above.
+    for (const value of selectedDrives) {
+      resources.push({
+        resource_type: "feishu_drive" as const,
+        resource_ref: value.startsWith("http")
+          ? { drive_url: value }
+          : { folder_token: value },
+      });
+    }
+    for (const value of selectedZentao) {
+      resources.push({
+        resource_type: "zentao_project" as const,
+        resource_ref: value.startsWith("http") ? { url: value } : { project_id: value },
+      });
     }
     setSubmitting(true);
     try {
@@ -267,7 +325,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
         lead_type: leadType,
         lead_id: leadId,
         // Server attaches these in the same transaction as the project.
-        resources,
+        resources: resources.length > 0 ? resources : undefined,
       });
       clearDraft();
       onClose();
@@ -538,6 +596,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
             </PopoverContent>
           </Popover>
 
+          {(canUseRepos || desktop) && (
           <Popover
             open={repoPopoverOpen}
             onOpenChange={(v) => {
@@ -575,7 +634,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                   Local option is desktop-only because a local_directory
                   resource has to be pinned to a daemon_id, which doesn't
                   exist on the web. */}
-              {desktop && (
+              {desktop && canUseRepos && (
                 <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/60 p-0.5">
                   <button
                     type="button"
@@ -786,6 +845,151 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
               )}
             </PopoverContent>
           </Popover>
+          )}
+
+          {enablement.feishu && (
+            <Popover
+              open={drivePopoverOpen}
+              onOpenChange={(v) => {
+                setDrivePopoverOpen(v);
+                if (!v) setDriveInput("");
+              }}
+            >
+              <PopoverTrigger
+                render={
+                  <PillButton>
+                    <Cloud className="size-3" />
+                    <span>
+                      {selectedDrives.length === 0
+                        ? t(($) => $.create_project.netdisk_pill)
+                        : t(($) => $.create_project.netdisk_pill_count, { count: selectedDrives.length })}
+                    </span>
+                  </PillButton>
+                }
+              />
+              <PopoverContent side="top" align="start" className="w-72 p-2 space-y-2">
+                <div className="text-xs font-medium text-muted-foreground">
+                  {t(($) => $.create_project.netdisk_heading)}
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    addDrive();
+                  }}
+                  className="flex items-center gap-1.5"
+                >
+                  <input
+                    type="text"
+                    value={driveInput}
+                    onChange={(e) => setDriveInput(e.target.value)}
+                    placeholder={t(($) => $.create_project.netdisk_placeholder)}
+                    className="flex-1 rounded-md border bg-transparent px-2 py-1 text-xs outline-none placeholder:text-muted-foreground"
+                  />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs"
+                    disabled={!driveInput.trim()}
+                  >
+                    {t(($) => $.create_project.repos_add)}
+                  </Button>
+                </form>
+                {selectedDrives.length > 0 && (
+                  <div className="space-y-1 pt-1 border-t">
+                    <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                      {t(($) => $.create_project.repos_selected)}
+                    </div>
+                    {selectedDrives.map((value) => (
+                      <div key={value} className="flex items-center gap-2 text-xs">
+                        <Cloud className="size-3 text-muted-foreground" />
+                        <RepoUrlText url={value} />
+                        <button
+                          type="button"
+                          onClick={() => removeDrive(value)}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          <XIcon className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </PopoverContent>
+            </Popover>
+          )}
+
+          {enablement.zentao && (
+            <Popover
+              open={zentaoPopoverOpen}
+              onOpenChange={(v) => {
+                setZentaoPopoverOpen(v);
+                if (!v) setZentaoInput("");
+              }}
+            >
+              <PopoverTrigger
+                render={
+                  <PillButton>
+                    <Kanban className="size-3" />
+                    <span>
+                      {selectedZentao.length === 0
+                        ? t(($) => $.create_project.zendao_pill)
+                        : t(($) => $.create_project.zendao_pill_count, { count: selectedZentao.length })}
+                    </span>
+                  </PillButton>
+                }
+              />
+              <PopoverContent side="top" align="start" className="w-72 p-2 space-y-2">
+                <div className="text-xs font-medium text-muted-foreground">
+                  {t(($) => $.create_project.zendao_heading)}
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    addZentao();
+                  }}
+                  className="flex items-center gap-1.5"
+                >
+                  <input
+                    type="text"
+                    value={zentaoInput}
+                    onChange={(e) => setZentaoInput(e.target.value)}
+                    placeholder={t(($) => $.create_project.zendao_placeholder)}
+                    className="flex-1 rounded-md border bg-transparent px-2 py-1 text-xs outline-none placeholder:text-muted-foreground"
+                  />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs"
+                    disabled={!zentaoInput.trim()}
+                  >
+                    {t(($) => $.create_project.repos_add)}
+                  </Button>
+                </form>
+                {selectedZentao.length > 0 && (
+                  <div className="space-y-1 pt-1 border-t">
+                    <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                      {t(($) => $.create_project.repos_selected)}
+                    </div>
+                    {selectedZentao.map((value) => (
+                      <div key={value} className="flex items-center gap-2 text-xs">
+                        <Kanban className="size-3 text-muted-foreground" />
+                        <RepoUrlText url={value} />
+                        <button
+                          type="button"
+                          onClick={() => removeZentao(value)}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          <XIcon className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </PopoverContent>
+            </Popover>
+          )}
           </div>
 
           <Button

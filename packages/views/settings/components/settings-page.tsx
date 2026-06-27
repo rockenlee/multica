@@ -8,11 +8,13 @@ import {
   Settings,
   Users,
   FolderGit2,
+  GitBranch,
   FlaskConical,
   Bell,
   Plug,
+  Kanban,
+  Cloud,
 } from "lucide-react";
-import { GitHubMark } from "./github-mark";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { useNavigation } from "../../navigation";
@@ -23,7 +25,14 @@ import { WorkspaceTab } from "./workspace-tab";
 import { MembersTab } from "./members-tab";
 import { RepositoriesTab } from "./repositories-tab";
 import { GitHubTab } from "./github-tab";
-import { IntegrationsTab } from "./integrations-tab";
+import {
+  FeishuIntegrationTab,
+  GitLabFeatureCard,
+  GitLabConnectionCard,
+  GitLabFeaturesCard,
+  IntegrationsTab,
+  ZenTaoIntegrationTab,
+} from "./integrations-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
 import { useT } from "../../i18n";
@@ -40,6 +49,8 @@ const WORKSPACE_TAB_KEYS = [
   "general",
   "repositories",
   "github",
+  "zentao",
+  "feishu",
   "integrations",
   "labs",
   "members",
@@ -48,6 +59,8 @@ const WORKSPACE_TAB_VALUES = {
   general: "workspace",
   repositories: "repositories",
   github: "github",
+  zentao: "zentao",
+  feishu: "feishu",
   integrations: "integrations",
   labs: "labs",
   members: "members",
@@ -55,7 +68,9 @@ const WORKSPACE_TAB_VALUES = {
 const WORKSPACE_TAB_ICONS = {
   general: Settings,
   repositories: FolderGit2,
-  github: GitHubMark,
+  github: GitBranch,
+  zentao: Kanban,
+  feishu: Cloud,
   integrations: Plug,
   labs: FlaskConical,
   members: Users,
@@ -67,9 +82,9 @@ const TAB_QUERY_KEY = "tab";
 // Legacy `?tab=…` values that have been collapsed into another tab. Old
 // bookmarks still land on the correct surface without us preserving a
 // dead TabsContent entry. Lark used to be its own top-level workspace
-// tab; it now lives inside Integrations.
+// tab; it now lives inside the Feishu workspace settings page.
 const LEGACY_WORKSPACE_TAB_REDIRECTS: Record<string, string> = {
-  lark: "integrations",
+  lark: "feishu",
 };
 
 export interface ExtraSettingsTab {
@@ -173,7 +188,15 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="tokens"><TokensTab /></TabsContent>
           <TabsContent value="workspace"><WorkspaceTab /></TabsContent>
           <TabsContent value="repositories"><RepositoriesTab /></TabsContent>
-          <TabsContent value="github"><GitHubTab /></TabsContent>
+          <TabsContent value="github">
+            <GitHubTab
+              gitLabFeature={<GitLabFeatureCard />}
+              gitLabConnection={<GitLabConnectionCard />}
+              gitLabFeatures={<GitLabFeaturesCard />}
+            />
+          </TabsContent>
+          <TabsContent value="zentao"><ZenTaoIntegrationTab /></TabsContent>
+          <TabsContent value="feishu"><FeishuIntegrationTab /></TabsContent>
           <TabsContent value="integrations"><IntegrationsTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           <TabsContent value="members"><MembersTab /></TabsContent>

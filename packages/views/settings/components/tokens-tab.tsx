@@ -2,11 +2,14 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Key, Trash2, Copy, Check } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
-import type { PersonalAccessToken } from "@multica/core/types";
+import type { IntegrationConnection, IntegrationUserAccount, PersonalAccessToken } from "@multica/core/types";
 import { Input } from "@multica/ui/components/ui/input";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
+import { Label } from "@multica/ui/components/ui/label";
+import { Switch } from "@multica/ui/components/ui/switch";
 import {
   Select,
   SelectTrigger,
@@ -36,7 +39,10 @@ import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
+import { integrationsOptions, integrationKeys } from "@multica/core/integrations";
+import { useWorkspaceId } from "@multica/core/hooks";
 import { useT } from "../../i18n";
+import { ConnectionStatusBadge, type ConnectionStatus } from "./connection-status";
 
 const EXPIRY_KEYS = ["30", "90", "365", "never"] as const;
 
@@ -247,6 +253,391 @@ export function TokensTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ExternalAccountsSection />
+    </div>
+  );
+}
+
+function ExternalAccountsSection() {
+  const { t } = useT("settings");
+  const wsId = useWorkspaceId();
+  const { data, isLoading } = useQuery(integrationsOptions(wsId));
+  const connections = data?.connections ?? [];
+  const accounts = data?.accounts ?? [];
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Key className="h-4 w-4 text-muted-foreground" />
+        <h2 className="text-sm font-semibold">
+          {t(($) => $.tokens.external_accounts_title)}
+        </h2>
+      </div>
+      <Card>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            {t(($) => $.tokens.external_accounts_description)}
+          </p>
+          {isLoading ? (
+            <p className="text-sm text-muted-foreground">{t(($) => $.lark.loading)}</p>
+          ) : connections.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {t(($) => $.tokens.external_accounts_empty)}
+            </p>
+          ) : (
+            <div className="space-y-4">
+              {connections.map((connection) => {
+                const connectionAccounts = accounts.filter(
+                  (item) => item.connection_id === connection.id,
+                );
+                return (
+                  <div key={connection.id} className="space-y-2">
+                    {connectionAccounts.map((account) => (
+                      <ExternalAccountRow
+                        key={account.id}
+                        connection={connection}
+                        account={account}
+                        credentialStorageEnabled={data?.credential_storage_enabled === true}
+                      />
+                    ))}
+                    <ExternalAccountRow
+                      key={`${connection.id}-new`}
+                      connection={connection}
+                      account={null}
+                      credentialStorageEnabled={data?.credential_storage_enabled === true}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+function ExternalAccountRow({
+  connection,
+  account,
+  credentialStorageEnabled,
+}: {
+  connection: IntegrationConnection;
+  account: IntegrationUserAccount | null;
+  credentialStorageEnabled: boolean;
+}) {
+  const { t } = useT("settings");
+  const wsId = useWorkspaceId();
+  const qc = useQueryClient();
+  const [accountName, setAccountName] = useState(account?.account_name ?? "");
+  const [username, setUsername] = useState(account?.external_username ?? "");
+  const [scopes, setScopes] = useState(account?.scopes?.join(", ") ?? "");
+  const [expiresAt, setExpiresAt] = useState(account?.expires_at?.slice(0, 10) ?? "");
+  const [credential, setCredential] = useState("");
+  const [syncEnabled, setSyncEnabled] = useState(account?.sync_enabled === true);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [password, setPassword] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [disconnectOpen, setDisconnectOpen] = useState(false);
+
+  const isFeishu = connection.provider === "feishu";
+  const isZentao = connection.provider === "zentao";
+
+  // Connection status derived from the stored account, surfaced as a badge so
+  // the user can see at a glance whether a re-connect is needed.
+  const connStatus: ConnectionStatus = !account?.credential_configured
+    ? "not_configured"
+    : account.last_error || account.status === "error"
+      ? "error"
+      : account.expires_at && new Date(account.expires_at).getTime() < Date.now()
+        ? "action_needed"
+        : "connected";
+  const statusLabel =
+    connStatus === "connected"
+      ? t(($) => $.integrations.status.connected)
+      : connStatus === "action_needed"
+        ? t(($) => $.integrations.status.action_needed)
+        : connStatus === "error"
+          ? t(($) => $.integrations.status.error)
+          : "";
+
+  async function connectFeishu() {
+    if (connecting) return;
+    setConnecting(true);
+    try {
+      const { authorize_url } = await api.startFeishuOAuth(wsId, connection.id);
+      window.open(authorize_url, "_blank", "noopener,noreferrer");
+      toast.info(t(($) => $.tokens.external_accounts_feishu_connect_opened));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t(($) => $.tokens.external_accounts_save_failed));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function connectZentao() {
+    if (connecting || !username.trim() || !password.trim()) return;
+    setConnecting(true);
+    try {
+      await api.zentaoLogin(wsId, connection.id, {
+        account: username.trim(),
+        password: password.trim(),
+        account_key: account?.account_key ?? undefined,
+        account_name: accountName.trim() || username.trim(),
+      });
+      await qc.invalidateQueries({ queryKey: integrationKeys.list(wsId) });
+      setPassword("");
+      toast.success(t(($) => $.tokens.external_accounts_zentao_connected));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t(($) => $.tokens.external_accounts_save_failed));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  useEffect(() => {
+    setAccountName(account?.account_name ?? "");
+    setUsername(account?.external_username ?? "");
+    setScopes(account?.scopes?.join(", ") ?? "");
+    setExpiresAt(account?.expires_at?.slice(0, 10) ?? "");
+    setCredential("");
+    setSyncEnabled(account?.sync_enabled === true);
+  }, [
+    account?.account_name,
+    account?.external_username,
+    account?.expires_at,
+    account?.scopes,
+    account?.sync_enabled,
+  ]);
+
+  async function saveAccount() {
+    if (saving || !accountName.trim()) return;
+    setSaving(true);
+    try {
+      await api.upsertIntegrationUserAccount(wsId, connection.id, {
+        account_key: account?.account_key ?? undefined,
+        account_name: accountName.trim(),
+        external_username: username.trim() || null,
+        credential: credential.trim() || undefined,
+        scopes: scopes
+          .split(",")
+          .map((scope) => scope.trim())
+          .filter(Boolean),
+        config: {},
+        status: "active",
+        sync_enabled: syncEnabled,
+        expires_at: expiresAt.trim() || null,
+      });
+      await qc.invalidateQueries({ queryKey: integrationKeys.list(wsId) });
+      setCredential("");
+      toast.success(t(($) => $.tokens.external_accounts_saved));
+    } catch (e) {
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : t(($) => $.tokens.external_accounts_save_failed),
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteAccount() {
+    if (!account || deleting) return;
+    setDeleting(true);
+    try {
+      await api.deleteIntegrationUserAccountById(wsId, account.id);
+      await qc.invalidateQueries({ queryKey: integrationKeys.list(wsId) });
+      toast.success(t(($) => $.tokens.external_accounts_deleted));
+    } catch (e) {
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : t(($) => $.tokens.external_accounts_delete_failed),
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-md border bg-muted/30 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="text-sm font-medium">
+            {account?.account_name || t(($) => $.tokens.external_accounts_new_title, { provider: connection.name })}
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {connection.base_url || connection.provider}
+          </div>
+        </div>
+        {connStatus !== "not_configured" && (
+          <ConnectionStatusBadge status={connStatus} label={statusLabel} />
+        )}
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label className="text-xs">
+            {t(($) => $.tokens.external_accounts_account_name)}
+          </Label>
+          <Input
+            value={accountName}
+            onChange={(event) => setAccountName(event.target.value)}
+            placeholder={t(($) => $.tokens.external_accounts_account_name_placeholder)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">
+            {t(($) => $.tokens.external_accounts_username)}
+          </Label>
+          <Input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder={t(($) => $.tokens.external_accounts_username_placeholder)}
+          />
+        </div>
+        {isZentao ? (
+          <div className="space-y-1.5">
+            <Label className="text-xs">
+              {t(($) => $.tokens.external_accounts_zentao_password)}
+            </Label>
+            <Input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder={t(($) => $.tokens.external_accounts_zentao_password_placeholder)}
+              disabled={!credentialStorageEnabled}
+            />
+          </div>
+        ) : isFeishu ? null : (
+          <div className="space-y-1.5">
+            <Label className="text-xs">
+              {t(($) => $.tokens.external_accounts_token)}
+            </Label>
+            <Input
+              type="password"
+              value={credential}
+              onChange={(event) => setCredential(event.target.value)}
+              placeholder={
+                account?.credential_configured
+                  ? t(($) => $.tokens.external_accounts_token_configured)
+                  : t(($) => $.tokens.external_accounts_token_placeholder)
+              }
+              disabled={!credentialStorageEnabled}
+            />
+          </div>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Switch
+            id={`external-account-${connection.id}`}
+            size="sm"
+            checked={syncEnabled}
+            onCheckedChange={setSyncEnabled}
+          />
+          <Label
+            htmlFor={`external-account-${connection.id}`}
+            className="text-xs text-muted-foreground"
+          >
+            {t(($) => $.tokens.external_accounts_sync)}
+          </Label>
+        </div>
+        <div className="flex items-center gap-2">
+          {isFeishu && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={connectFeishu}
+              disabled={connecting || !credentialStorageEnabled}
+            >
+              {account?.credential_configured
+                ? t(($) => $.integrations.reconnect)
+                : t(($) => $.tokens.external_accounts_feishu_connect)}
+            </Button>
+          )}
+          {isZentao && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={connectZentao}
+              disabled={
+                connecting ||
+                !username.trim() ||
+                !password.trim() ||
+                !credentialStorageEnabled
+              }
+            >
+              {connecting
+                ? t(($) => $.integrations.connecting)
+                : account?.credential_configured
+                  ? t(($) => $.integrations.reconnect)
+                  : t(($) => $.tokens.external_accounts_zentao_connect)}
+            </Button>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            onClick={saveAccount}
+            disabled={
+              saving ||
+              !accountName.trim() ||
+              (!credentialStorageEnabled && credential.trim().length > 0)
+            }
+          >
+            {saving
+              ? t(($) => $.tokens.external_accounts_saving)
+              : t(($) => $.tokens.external_accounts_save)}
+          </Button>
+          {account && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setDisconnectOpen(true)}
+              disabled={deleting}
+            >
+              {t(($) => $.integrations.disconnect)}
+            </Button>
+          )}
+        </div>
+      </div>
+      <AlertDialog open={disconnectOpen} onOpenChange={setDisconnectOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t(($) => $.tokens.external_accounts_disconnect_title)}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(($) => $.tokens.external_accounts_disconnect_desc)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t(($) => $.tokens.revoke_dialog.cancel)}</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={async () => {
+                setDisconnectOpen(false);
+                await deleteAccount();
+              }}
+            >
+              {t(($) => $.integrations.disconnect)}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {isFeishu && (
+        <p className="text-xs text-muted-foreground">
+          {t(($) => $.tokens.external_accounts_feishu_connect_hint)}
+        </p>
+      )}
+      {!credentialStorageEnabled && (
+        <p className="text-xs text-muted-foreground">
+          {t(($) => $.tokens.external_accounts_secret_required)}
+        </p>
+      )}
     </div>
   );
 }

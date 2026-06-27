@@ -14,8 +14,12 @@ export {
 } from "./stores/view-store";
 export {
   projectResourceKeys,
+  workspaceResourceKeys,
   projectResourcesOptions,
+  workspaceResourcesOptions,
   useCreateProjectResource,
+  useCreateWorkspaceResource,
   useUpdateProjectResource,
   useDeleteProjectResource,
+  useDeleteWorkspaceResource,
 } from "./resource-queries";

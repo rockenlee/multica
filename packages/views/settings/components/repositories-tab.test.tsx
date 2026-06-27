@@ -1,12 +1,15 @@
 import type { ReactNode } from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
 
 const mockUpdateWorkspace = vi.hoisted(() => vi.fn());
+const mockCreateWorkspaceResource = vi.hoisted(() => vi.fn());
+const mockDeleteWorkspaceResource = vi.hoisted(() => vi.fn());
+const mockInvalidateQueries = vi.hoisted(() => vi.fn());
 const workspaceRef = vi.hoisted(() => ({
   current: {
     id: "workspace-1",
@@ -18,10 +21,32 @@ const workspaceRef = vi.hoisted(() => ({
 const membersRef = vi.hoisted(() => ({
   current: [{ user_id: "user-1", role: "owner" as const }],
 }));
+const workspaceResourcesRef = vi.hoisted(() => ({
+  current: [] as {
+    id: string;
+    workspace_id: string;
+    resource_type: string;
+    resource_ref: Record<string, unknown>;
+    label: string | null;
+    created_at: string;
+    updated_at: string;
+    created_by: string | null;
+    can_manage: boolean;
+  }[],
+}));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: membersRef.current }),
-  useQueryClient: () => ({ setQueryData: vi.fn() }),
+  useQuery: (options?: { queryKey?: readonly unknown[] }) => {
+    const key = options?.queryKey;
+    if (Array.isArray(key) && key[0] === "workspaces" && key.includes("resources")) {
+      return { data: workspaceResourcesRef.current };
+    }
+    return { data: membersRef.current };
+  },
+  useQueryClient: () => ({
+    setQueryData: vi.fn(),
+    invalidateQueries: mockInvalidateQueries,
+  }),
 }));
 
 vi.mock("@multica/core/hooks", () => ({
@@ -37,8 +62,19 @@ vi.mock("@multica/core/workspace/queries", () => ({
   workspaceKeys: { list: () => ["workspaces"] },
 }));
 
+vi.mock("@multica/core/projects", () => ({
+  workspaceResourcesOptions: (wsId: string) => ({
+    queryKey: ["workspaces", wsId, "resources"],
+    queryFn: vi.fn(),
+  }),
+  useCreateWorkspaceResource: () => ({ mutateAsync: mockCreateWorkspaceResource }),
+  useDeleteWorkspaceResource: () => ({ mutateAsync: mockDeleteWorkspaceResource }),
+}));
+
 vi.mock("@multica/core/api", () => ({
-  api: { updateWorkspace: mockUpdateWorkspace },
+  api: {
+    updateWorkspace: mockUpdateWorkspace,
+  },
 }));
 
 vi.mock("@multica/core/auth", () => {
@@ -68,6 +104,8 @@ function I18nWrapper({ children }: { children: ReactNode }) {
   );
 }
 
+const REPO_URL_PLACEHOLDER = "https://git.example.com/org/repo.git or git@git.example.com:org/repo.git";
+
 describe("RepositoriesTab — view/edit toggle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -78,11 +116,12 @@ describe("RepositoriesTab — view/edit toggle", () => {
       repos: [{ url: "https://github.com/multica-ai/multica" }],
     };
     membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    workspaceResourcesRef.current = [];
   });
 
   it("renders persisted repos in display mode (no input)", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByDisplayValue("https://github.com/multica-ai/multica")).toBeNull();
     expect(screen.getByText("https://github.com/multica-ai/multica")).toBeTruthy();
   });
 
@@ -97,8 +136,7 @@ describe("RepositoriesTab — view/edit toggle", () => {
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
 
-    const inputs = screen.getAllByRole("textbox") as HTMLInputElement[];
-    expect(inputs[0]!.value).toBe("https://github.com/multica-ai/multica");
+    expect(screen.getByDisplayValue("https://github.com/multica-ai/multica")).toBeTruthy();
   });
 
   it("Save re-enables after editing, then returns to display mode + disabled on success", async () => {
@@ -111,7 +149,7 @@ describe("RepositoriesTab — view/edit toggle", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
-    const input = screen.getAllByRole("textbox")[0]!;
+    const input = screen.getByDisplayValue("https://github.com/multica-ai/multica");
     await user.clear(input);
     await user.type(input, "https://github.com/multica-ai/edited");
 
@@ -134,7 +172,7 @@ describe("RepositoriesTab — view/edit toggle", () => {
 
     // After successful save, edit mode is cleared — input gone, Save disabled.
     await waitFor(() => {
-      expect(screen.queryByRole("textbox")).toBeNull();
+      expect(screen.queryByDisplayValue("https://github.com/multica-ai/edited")).toBeNull();
     });
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
   });
@@ -143,10 +181,10 @@ describe("RepositoriesTab — view/edit toggle", () => {
     const user = userEvent.setup();
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByPlaceholderText(REPO_URL_PLACEHOLDER)).toBeNull();
     await user.click(screen.getByRole("button", { name: /Add repository/ }));
 
-    expect(screen.getAllByRole("textbox").length).toBe(2); // url + description
+    expect(screen.getByPlaceholderText(REPO_URL_PLACEHOLDER)).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Save$/ })).not.toBeDisabled();
   });
 
@@ -155,11 +193,11 @@ describe("RepositoriesTab — view/edit toggle", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
-    expect(screen.getAllByRole("textbox").length).toBe(2);
+    expect(screen.getByDisplayValue("https://github.com/multica-ai/multica")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Cancel edit" }));
 
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByDisplayValue("https://github.com/multica-ai/multica")).toBeNull();
     expect(screen.getByText("https://github.com/multica-ai/multica")).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
     expect(mockUpdateWorkspace).not.toHaveBeenCalled();
@@ -170,14 +208,14 @@ describe("RepositoriesTab — view/edit toggle", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
-    const input = screen.getAllByRole("textbox")[0] as HTMLInputElement;
+    const input = screen.getByDisplayValue("https://github.com/multica-ai/multica") as HTMLInputElement;
     await user.clear(input);
     await user.type(input, "https://github.com/multica-ai/changed");
     expect(screen.getByRole("button", { name: /^Save$/ })).not.toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Cancel edit" }));
 
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByDisplayValue("https://github.com/multica-ai/multica")).toBeNull();
     expect(screen.getByText("https://github.com/multica-ai/multica")).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
   });
@@ -187,11 +225,11 @@ describe("RepositoriesTab — view/edit toggle", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
     await user.click(screen.getByRole("button", { name: /Add repository/ }));
-    expect(screen.getAllByRole("textbox").length).toBe(2);
+    expect(screen.getByPlaceholderText(REPO_URL_PLACEHOLDER)).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Cancel edit" }));
 
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByPlaceholderText(REPO_URL_PLACEHOLDER)).toBeNull();
     // Original persisted row is still there; the new empty row is gone.
     expect(screen.getByText("https://github.com/multica-ai/multica")).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
@@ -209,7 +247,7 @@ describe("RepositoriesTab — view/edit toggle", () => {
     render(<RepositoriesTab />, { wrapper: I18nWrapper });
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
-    const input = screen.getAllByRole("textbox")[0] as HTMLInputElement;
+    const input = screen.getByDisplayValue("https://github.com/multica-ai/multica") as HTMLInputElement;
     await user.clear(input);
     await user.type(input, "git@github.com:multica-ai/multica.git");
 
@@ -238,16 +276,14 @@ describe("RepositoriesTab — view/edit toggle", () => {
     // Edit the second row.
     const editButtons = screen.getAllByRole("button", { name: "Edit repository" });
     await user.click(editButtons[1]!);
-    expect((screen.getAllByRole("textbox")[0] as HTMLInputElement).value).toBe(
-      "https://b.example/repo.git",
-    );
+    expect(screen.getByDisplayValue("https://b.example/repo.git")).toBeTruthy();
 
     // Delete the first row. The remaining row should remain in edit mode
     // (its index dropped from 1 → 0).
     const deleteButtons = screen.getAllByRole("button", { name: "Delete repository" });
     await user.click(deleteButtons[0]!);
 
-    const input = screen.getAllByRole("textbox")[0] as HTMLInputElement;
+    const input = screen.getByDisplayValue("https://b.example/repo.git") as HTMLInputElement;
     expect(input.value).toBe("https://b.example/repo.git");
   });
 
@@ -270,17 +306,60 @@ describe("RepositoriesTab — view/edit toggle", () => {
     expect(screen.getByText("Main app")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Edit repository" }));
-    const inputs = screen.getAllByRole("textbox") as HTMLInputElement[];
-    expect(inputs[1]!.value).toBe("Main app");
+    const descriptionInput = screen.getByDisplayValue("Main app") as HTMLInputElement;
 
-    await user.clear(inputs[1]!);
-    await user.type(inputs[1]!, "Updated description");
+    await user.clear(descriptionInput);
+    await user.type(descriptionInput, "Updated description");
 
     await user.click(screen.getByRole("button", { name: /^Save$/ }));
 
     await waitFor(() => {
       expect(mockUpdateWorkspace).toHaveBeenCalledWith("workspace-1", {
         repos: [{ url: "https://github.com/multica-ai/multica", description: "Updated description" }],
+      });
+    });
+  });
+
+  it("adds a workspace resource from the Resources page", async () => {
+    mockCreateWorkspaceResource.mockResolvedValue({
+      id: "resource-1",
+      workspace_id: "workspace-1",
+      resource_type: "feishu_drive",
+      resource_ref: {
+        drive_url: "https://feishu.cn/drive/folder",
+        label: "Product docs",
+      },
+      label: "Product docs",
+      created_at: "2026-06-26T00:00:00Z",
+      updated_at: "2026-06-26T00:00:00Z",
+      created_by: "user-1",
+      can_manage: true,
+    });
+
+    const user = userEvent.setup();
+    render(<RepositoriesTab />, { wrapper: I18nWrapper });
+
+    fireEvent.change(screen.getByPlaceholderText("Drive URL or folder token"), {
+      target: { value: "https://feishu.cn/drive/folder" },
+    });
+    fireEvent.change(screen.getAllByPlaceholderText("Optional name")[2]!, {
+      target: { value: "Product docs" },
+    });
+
+    const addButton = screen.getAllByRole("button", { name: /^Add resource$/ })[2]!;
+    await waitFor(() => {
+      expect(addButton).not.toBeDisabled();
+    });
+    await user.click(addButton);
+
+    await waitFor(() => {
+      expect(mockCreateWorkspaceResource).toHaveBeenCalledWith({
+        resource_type: "feishu_drive",
+        resource_ref: {
+          drive_url: "https://feishu.cn/drive/folder",
+          label: "Product docs",
+        },
+        label: "Product docs",
       });
     });
   });

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ExternalLink, GitCommitHorizontal, Link2, PanelRight } from "lucide-react";
+import { GitCommitHorizontal, Link2, PanelRight } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Label } from "@multica/ui/components/ui/label";
@@ -28,7 +28,6 @@ import {
 } from "@multica/core/github";
 import { api } from "@multica/core/api";
 import type { Workspace } from "@multica/core/types";
-import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { GitHubMark } from "./github-mark";
 
@@ -38,12 +37,19 @@ type SettingsKey =
   | "co_authored_by_enabled"
   | "github_auto_link_prs_enabled";
 
-export function GitHubTab() {
+export function GitHubTab({
+  gitLabFeature,
+  gitLabConnection,
+  gitLabFeatures,
+}: {
+  gitLabFeature?: ReactNode;
+  gitLabConnection?: ReactNode;
+  gitLabFeatures?: ReactNode;
+} = {}) {
   const { t } = useT("settings");
   const workspace = useCurrentWorkspace();
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
-  const navigation = useNavigation();
   const user = useAuthStore((s) => s.user);
 
   const { data: members = [] } = useQuery(memberListOptions(wsId));
@@ -122,8 +128,6 @@ export function GitHubTab() {
 
   if (!workspace) return null;
 
-  const repositoriesHref = `${navigation.pathname}?tab=repositories`;
-
   return (
     <div className="space-y-8">
       <section className="space-y-1">
@@ -160,6 +164,7 @@ export function GitHubTab() {
             </div>
           </CardContent>
         </Card>
+        {gitLabFeature}
       </section>
 
       <section className="space-y-3">
@@ -251,6 +256,7 @@ export function GitHubTab() {
             )}
           </CardContent>
         </Card>
+        {gitLabConnection}
       </section>
 
       <section className="space-y-3">
@@ -304,27 +310,7 @@ export function GitHubTab() {
             />
           </CardContent>
         </Card>
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold">{t(($) => $.github.section_repositories)}</h2>
-        <Card>
-          <CardContent>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm font-medium">
-                {t(($) => $.github.repositories_shortcut_label)}
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => navigation.push(repositoriesHref)}
-              >
-                <ExternalLink className="h-3 w-3" />
-                {t(($) => $.github.repositories_shortcut_link)}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        {gitLabFeatures}
       </section>
 
       <AlertDialog

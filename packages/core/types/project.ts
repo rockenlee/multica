@@ -53,11 +53,28 @@ export interface ListProjectsResponse {
 //
 // Known types (UI must default-case unknown server-side additions):
 //   - github_repo: cloud-side git checkout, ref = { url, default_branch_hint? }
+//   - gitlab_repo: GitLab repository pointer, ref = { url, default_branch_hint? }
 //   - local_directory: in-place agent execution on a specific daemon,
 //     ref = { local_path, daemon_id, label? }
-export type ProjectResourceType = "github_repo" | "local_directory";
+//   - feishu_drive: Feishu Drive folder/file pointer
+//   - feishu_wiki: Feishu Wiki space/node pointer
+//   - zentao_project: ZenTao project pointer
+//   - zentao_product: ZenTao product pointer
+export type ProjectResourceType =
+  | "github_repo"
+  | "gitlab_repo"
+  | "local_directory"
+  | "feishu_drive"
+  | "feishu_wiki"
+  | "zentao_project"
+  | "zentao_product";
 
 export interface GithubRepoResourceRef {
+  url: string;
+  default_branch_hint?: string;
+}
+
+export interface GitLabRepoResourceRef {
   url: string;
   default_branch_hint?: string;
 }
@@ -68,9 +85,43 @@ export interface LocalDirectoryResourceRef {
   label?: string;
 }
 
+export interface FeishuDriveResourceRef {
+  drive_url?: string;
+  folder_token?: string;
+  node_token?: string;
+  label?: string;
+}
+
+export interface FeishuWikiResourceRef {
+  wiki_url?: string;
+  space_id?: string;
+  node_token?: string;
+  label?: string;
+}
+
+export interface ZenTaoProjectResourceRef {
+  project_id?: string;
+  project_key?: string;
+  product_id?: string;
+  url?: string;
+  label?: string;
+}
+
+export interface ZenTaoProductResourceRef {
+  product_id?: string;
+  product_key?: string;
+  url?: string;
+  label?: string;
+}
+
 export type ProjectResourceRef =
   | GithubRepoResourceRef
+  | GitLabRepoResourceRef
   | LocalDirectoryResourceRef
+  | FeishuDriveResourceRef
+  | FeishuWikiResourceRef
+  | ZenTaoProjectResourceRef
+  | ZenTaoProductResourceRef
   | Record<string, unknown>;
 
 export interface ProjectResource {
@@ -85,11 +136,31 @@ export interface ProjectResource {
   created_by: string | null;
 }
 
+export type WorkspaceResourceType = Exclude<ProjectResourceType, "local_directory">;
+
+export interface WorkspaceResource {
+  id: string;
+  workspace_id: string;
+  resource_type: WorkspaceResourceType;
+  resource_ref: ProjectResourceRef;
+  label: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  can_manage: boolean;
+}
+
 export interface CreateProjectResourceRequest {
   resource_type: ProjectResourceType;
   resource_ref: ProjectResourceRef;
   label?: string;
   position?: number;
+}
+
+export interface CreateWorkspaceResourceRequest {
+  resource_type: WorkspaceResourceType;
+  resource_ref: ProjectResourceRef;
+  label?: string;
 }
 
 // resource_type is immutable server-side; partial-update payload mirrors that.
@@ -103,5 +174,10 @@ export interface UpdateProjectResourceRequest {
 
 export interface ListProjectResourcesResponse {
   resources: ProjectResource[];
+  total: number;
+}
+
+export interface ListWorkspaceResourcesResponse {
+  resources: WorkspaceResource[];
   total: number;
 }

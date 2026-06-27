@@ -39,6 +39,18 @@
     "view_swimlane_short": "스윔레인",
     "sort_manual": "수동"
   },
+  "sync_settings": {
+    "trigger": "동기화 설정",
+    "title": "Issue 동기화 설정",
+    "description": "My Issues로 가져올 외부 채널과 명시적으로 외부로 동기화할 수 있는 채널을 선택합니다.",
+    "channel_column": "채널",
+    "inbound_column": "입站",
+    "outbound_column": "출站",
+    "inbound_aria": "{{provider}} 입站 동기화 켜기",
+    "outbound_aria": "{{provider}} 출站 동기화 켜기",
+    "save_failed": "Issue 동기화 설정 저장에 실패했습니다",
+    "resource_hint": "프로젝트 리소스가 외부 대상을 제공합니다. 프로젝트가 해당 채널 리소스에 연결되어 있고 이 채널이 켜져 있으면 관련 issue를 여기로 동기화할 수 있습니다."
+  },
   "errors": {
     "move_failed": "이슈를 이동하지 못했습니다"
   }

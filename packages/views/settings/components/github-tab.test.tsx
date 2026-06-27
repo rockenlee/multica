@@ -271,10 +271,32 @@ describe("GitHubTab", () => {
     expect(screen.getByText(/Connected by Jiayuan/)).toBeTruthy();
   });
 
-  it("repositories shortcut navigates to the repositories tab", async () => {
-    const user = userEvent.setup();
+  it("does not render a repository shortcut inside the Git page", () => {
     render(<GitHubTab />, { wrapper: I18nWrapper });
-    await user.click(screen.getByRole("button", { name: /Manage repositories/ }));
-    expect(mockNavPush).toHaveBeenCalledWith("/acme/settings?tab=repositories");
+    expect(screen.queryByRole("button", { name: /Manage repositories/ })).toBeNull();
+    expect(mockNavPush).not.toHaveBeenCalled();
+  });
+
+  it("renders optional GitLab modules in the GitHub-style sections", () => {
+    render(
+      <GitHubTab
+        gitLabFeature={<div>Enable GitLab features</div>}
+        gitLabConnection={<div>GitLab enterprise connection</div>}
+      />,
+      { wrapper: I18nWrapper },
+    );
+
+    const gitLabFeature = screen.getByText("Enable GitLab features");
+    const connectionHeading = screen.getByRole("heading", { name: /^Connection$/ });
+    const gitLabConnection = screen.getByText("GitLab enterprise connection");
+
+    expect(
+      gitLabFeature.compareDocumentPosition(connectionHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      connectionHeading.compareDocumentPosition(gitLabConnection) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

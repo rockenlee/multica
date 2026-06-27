@@ -165,6 +165,22 @@ describe("filterIssues", () => {
     expect(result.map((i) => i.id)).toEqual(["1", "4"]);
   });
 
+  it("filters by external source channel", () => {
+    const sourceIssues = [
+      makeIssue({ id: "gitlab", metadata: { source_system: "gitlab" } }),
+      makeIssue({ id: "zentao", metadata: { source_system: "zentao" } }),
+      makeIssue({ id: "lark", metadata: { source_system: "lark" } }),
+      makeIssue({ id: "native", metadata: {} }),
+    ];
+
+    const result = filterIssues(sourceIssues, {
+      ...NO_FILTER,
+      sourceFilters: ["feishu", "gitlab"],
+    });
+
+    expect(result.map((i) => i.id)).toEqual(["gitlab", "lark"]);
+  });
+
   // --- Label ---
   // Build a separate fixture for label tests so we can sprinkle labels onto
   // specific rows without polluting the assignee/project test cases above.

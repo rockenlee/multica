@@ -95,12 +95,21 @@ export type {
   ListProjectsResponse,
   ProjectResource,
   ProjectResourceType,
+  WorkspaceResource,
+  WorkspaceResourceType,
   ProjectResourceRef,
   GithubRepoResourceRef,
+  GitLabRepoResourceRef,
   LocalDirectoryResourceRef,
+  FeishuDriveResourceRef,
+  FeishuWikiResourceRef,
+  ZenTaoProjectResourceRef,
+  ZenTaoProductResourceRef,
   CreateProjectResourceRequest,
+  CreateWorkspaceResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  ListWorkspaceResourcesResponse,
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
 export type {
@@ -119,6 +128,23 @@ export type {
   LarkInstallStatusResponse,
   RedeemLarkBindingTokenResponse,
 } from "./lark";
+export type {
+  IntegrationConnection,
+  IntegrationIssueSyncSetting,
+  IntegrationProvider,
+  IntegrationProjectBinding,
+  IntegrationSyncEvent,
+  IntegrationUserAccount,
+  IssueOutboundSyncResponse,
+  ListIntegrationsResponse,
+  RequestIssueOutboundSyncRequest,
+  SyncInboundIntegrationIssueRequest,
+  SyncInboundIntegrationIssueResponse,
+  UpsertIntegrationConnectionRequest,
+  UpsertIntegrationIssueSyncSettingRequest,
+  UpsertIntegrationProjectBindingRequest,
+  UpsertIntegrationUserAccountRequest,
+} from "./integration";
 export type {
   Autopilot,
   AutopilotStatus,

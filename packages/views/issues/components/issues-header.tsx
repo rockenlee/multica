@@ -13,6 +13,7 @@ import {
   FolderKanban,
   FolderMinus,
   List,
+  RefreshCw,
   SignalHigh,
   SlidersHorizontal,
   X,
@@ -83,6 +84,11 @@ import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 import { FILTER_ITEM_CLASS, HoverCheck } from "../../common/hover-check";
 import { WorkspaceAgentWorkingChip } from "./workspace-agent-working-chip";
+import {
+  getIssueSourceProvider,
+  ISSUE_SYNC_PROVIDERS,
+  type IssueSyncProvider,
+} from "@multica/core/issues";
 
 type LocalDateRange = {
   from: Date | undefined;
@@ -102,6 +108,7 @@ function getActiveFilterCount(state: {
   projectFilters: string[];
   includeNoProject: boolean;
   labelFilters: string[];
+  sourceFilters?: IssueSyncProvider[];
   dateFilter?: IssueDateFilter | null;
 }) {
   let count = 0;
@@ -111,6 +118,7 @@ function getActiveFilterCount(state: {
   if (state.creatorFilters.length > 0) count++;
   if (state.projectFilters.length > 0 || state.includeNoProject) count++;
   if (state.labelFilters.length > 0) count++;
+  if ((state.sourceFilters?.length ?? 0) > 0) count++;
   if (state.dateFilter) count++;
   return count;
 }
@@ -128,6 +136,12 @@ const DATE_FIELD_LABEL_KEY: Record<IssueDateField, "date_field_created" | "date_
   updated_at: "date_field_updated",
 };
 
+const ISSUE_SOURCE_LABEL_KEY: Record<IssueSyncProvider, "source_feishu" | "source_zentao" | "source_gitlab"> = {
+  feishu: "source_feishu",
+  zentao: "source_zentao",
+  gitlab: "source_gitlab",
+};
+
 function useIssueCounts(allIssues: Issue[]) {
   return useMemo(() => {
     const status = new Map<string, number>();
@@ -136,6 +150,7 @@ function useIssueCounts(allIssues: Issue[]) {
     const creator = new Map<string, number>();
     const project = new Map<string, number>();
     const label = new Map<string, number>();
+    const source = new Map<IssueSyncProvider, number>();
     let noAssignee = 0;
     let noProject = 0;
 
@@ -164,9 +179,14 @@ function useIssueCounts(allIssues: Issue[]) {
           label.set(l.id, (label.get(l.id) ?? 0) + 1);
         }
       }
+
+      const sourceProvider = getIssueSourceProvider(issue);
+      if (sourceProvider) {
+        source.set(sourceProvider, (source.get(sourceProvider) ?? 0) + 1);
+      }
     }
 
-    return { status, priority, assignee, creator, noAssignee, project, noProject, label };
+    return { status, priority, assignee, creator, noAssignee, project, noProject, label, source };
   }, [allIssues]);
 }
 
@@ -745,11 +765,17 @@ export function IssueDisplayControls({
   allowGantt = false,
   dateFilter = null,
   onDateFilterChange,
+  issueSourceFilters = [],
+  onToggleIssueSourceFilter,
+  onClearIssueSourceFilters,
 }: {
   scopedIssues: Issue[];
   hideViewToggle?: boolean;
   dateFilter?: IssueDateFilter | null;
   onDateFilterChange?: (filter: IssueDateFilter | null) => void;
+  issueSourceFilters?: IssueSyncProvider[];
+  onToggleIssueSourceFilter?: (provider: IssueSyncProvider) => void;
+  onClearIssueSourceFilters?: () => void;
   // Only Project Detail renders <GanttView>; other surfaces (global /issues,
   // /my-issues, actor panel) ignore viewMode === "gantt" and would silently
   // fall back to List if the option were exposed there. Keep Gantt opt-in.
@@ -784,6 +810,7 @@ export function IssueDisplayControls({
     projectFilters,
     includeNoProject,
     labelFilters,
+    sourceFilters: onToggleIssueSourceFilter ? issueSourceFilters : [],
     dateFilter: showDateFilter ? dateFilter : null,
   });
   const hasActiveFilters = activeFilterCount > 0;
@@ -863,6 +890,7 @@ export function IssueDisplayControls({
                             e.preventDefault();
                             e.stopPropagation();
                             act.clearFilters();
+                            onClearIssueSourceFilters?.();
                             onDateFilterChange?.(null);
                           }}
                           onPointerDown={(e) => e.stopPropagation()}
@@ -970,6 +998,42 @@ export function IssueDisplayControls({
               </DropdownMenuSub>
             )}
 
+            {onToggleIssueSourceFilter && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <RefreshCw className="size-3.5" />
+                  <span className="flex-1">{t(($) => $.filters.section_channel_sync)}</span>
+                  {issueSourceFilters.length > 0 && (
+                    <span className="text-xs text-primary font-medium">
+                      {issueSourceFilters.length}
+                    </span>
+                  )}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-auto min-w-44">
+                  {ISSUE_SYNC_PROVIDERS.map((provider) => {
+                    const checked = issueSourceFilters.includes(provider);
+                    const count = counts.source.get(provider) ?? 0;
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={provider}
+                        checked={checked}
+                        onCheckedChange={() => onToggleIssueSourceFilter(provider)}
+                        className={FILTER_ITEM_CLASS}
+                      >
+                        <HoverCheck checked={checked} />
+                        {t(($) => $.sync[ISSUE_SOURCE_LABEL_KEY[provider]])}
+                        {count > 0 && (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            {t(($) => $.filters.issue_count, { count })}
+                          </span>
+                        )}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+
             {/* Assignee */}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
@@ -1065,6 +1129,7 @@ export function IssueDisplayControls({
                 <DropdownMenuItem
                   onClick={() => {
                     act.clearFilters();
+                    onClearIssueSourceFilters?.();
                     onDateFilterChange?.(null);
                   }}
                 >

@@ -38,6 +38,18 @@
     "view_swimlane_short": "泳道",
     "sort_manual": "手动"
   },
+  "sync_settings": {
+    "trigger": "同步设置",
+    "title": "Issue 同步设置",
+    "description": "设置哪些外部渠道可以同步进我的 issue，以及哪些渠道允许显式同步出站。",
+    "channel_column": "渠道",
+    "inbound_column": "入站",
+    "outbound_column": "出站",
+    "inbound_aria": "开启 {{provider}} 入站同步",
+    "outbound_aria": "开启 {{provider}} 出站同步",
+    "save_failed": "Issue 同步设置保存失败",
+    "resource_hint": "项目资源提供外部目标。项目绑定了对应渠道的资源，并且这里开启了该渠道后，相关 issue 才会同步到这里。"
+  },
   "errors": {
     "move_failed": "移动 issue 失败"
   }

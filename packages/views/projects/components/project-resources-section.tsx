@@ -3,9 +3,13 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  BookOpen,
   ChevronRight,
+  Cloud,
   FolderGit,
   FolderOpen,
+  GitBranch,
+  Kanban,
   Pencil,
   Plus,
   Search,
@@ -19,18 +23,19 @@ import {
   useUpdateProjectResource,
 } from "@multica/core/projects";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useProviderEnablement } from "@multica/core/integrations";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import type {
+  FeishuDriveResourceRef,
+  FeishuWikiResourceRef,
   GithubRepoResourceRef,
+  GitLabRepoResourceRef,
   LocalDirectoryResourceRef,
   ProjectResource,
+  ZenTaoProductResourceRef,
+  ZenTaoProjectResourceRef,
 } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@multica/ui/components/ui/popover";
 import {
   Tooltip,
   TooltipTrigger,
@@ -57,16 +62,49 @@ function isGithubRef(r: ProjectResource): r is ProjectResource & {
   return r.resource_type === "github_repo";
 }
 
+function isGitLabRef(r: ProjectResource): r is ProjectResource & {
+  resource_ref: GitLabRepoResourceRef;
+} {
+  return r.resource_type === "gitlab_repo";
+}
+
 function isLocalDirectoryRef(r: ProjectResource): r is ProjectResource & {
   resource_ref: LocalDirectoryResourceRef;
 } {
   return r.resource_type === "local_directory";
 }
 
+function isFeishuDriveRef(r: ProjectResource): r is ProjectResource & {
+  resource_ref: FeishuDriveResourceRef;
+} {
+  return r.resource_type === "feishu_drive";
+}
+
+function isFeishuWikiRef(r: ProjectResource): r is ProjectResource & {
+  resource_ref: FeishuWikiResourceRef;
+} {
+  return r.resource_type === "feishu_wiki";
+}
+
+function isZenTaoProjectRef(r: ProjectResource): r is ProjectResource & {
+  resource_ref: ZenTaoProjectResourceRef;
+} {
+  return r.resource_type === "zentao_project";
+}
+
+function isZenTaoProductRef(r: ProjectResource): r is ProjectResource & {
+  resource_ref: ZenTaoProductResourceRef;
+} {
+  return r.resource_type === "zentao_product";
+}
+
 export function ProjectResourcesSection({ projectId }: { projectId: string }) {
   const { t } = useT("projects");
   const wsId = useWorkspaceId();
   const workspace = useCurrentWorkspace();
+  // Only surface resource pickers for providers the workspace has enabled,
+  // matching the gating in the create-project dialog.
+  const enablement = useProviderEnablement(wsId, workspace);
   const daemonStatus = useLocalDaemonStatus();
   const [open, setOpen] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
@@ -117,6 +155,72 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
         resource_ref: { url },
       });
       toast.success(t(($) => $.resources.toast_attached));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t(($) => $.resources.toast_attach_failed);
+      toast.error(msg);
+    }
+  };
+
+  const handleAttachGitLab = async (url: string) => {
+    try {
+      await createResource.mutateAsync({
+        resource_type: "gitlab_repo",
+        resource_ref: { url },
+      });
+      toast.success(t(($) => $.resources.toast_gitlab_attached));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t(($) => $.resources.toast_attach_failed);
+      toast.error(msg);
+    }
+  };
+
+  const handleAttachExternalResource = async (
+    resourceType:
+      | "feishu_drive"
+      | "feishu_wiki"
+      | "zentao_project"
+      | "zentao_product",
+    value: string,
+    label: string,
+  ) => {
+    const trimmed = value.trim();
+    const trimmedLabel = label.trim();
+    if (!trimmed) return;
+    try {
+      if (resourceType === "feishu_drive") {
+        await createResource.mutateAsync({
+          resource_type: resourceType,
+          resource_ref: trimmed.startsWith("http")
+            ? { drive_url: trimmed, label: trimmedLabel }
+            : { folder_token: trimmed, label: trimmedLabel },
+          label: trimmedLabel || undefined,
+        });
+      } else if (resourceType === "feishu_wiki") {
+        await createResource.mutateAsync({
+          resource_type: resourceType,
+          resource_ref: trimmed.startsWith("http")
+            ? { wiki_url: trimmed, label: trimmedLabel }
+            : { space_id: trimmed, label: trimmedLabel },
+          label: trimmedLabel || undefined,
+        });
+      } else if (resourceType === "zentao_project") {
+        await createResource.mutateAsync({
+          resource_type: resourceType,
+          resource_ref: trimmed.startsWith("http")
+            ? { url: trimmed, label: trimmedLabel }
+            : { project_id: trimmed, label: trimmedLabel },
+          label: trimmedLabel || undefined,
+        });
+      } else {
+        await createResource.mutateAsync({
+          resource_type: resourceType,
+          resource_ref: trimmed.startsWith("http")
+            ? { url: trimmed, label: trimmedLabel }
+            : { product_id: trimmed, label: trimmedLabel },
+          label: trimmedLabel || undefined,
+        });
+      }
+      toast.success(t(($) => $.resources.toast_external_attached));
     } catch (err) {
       const msg = err instanceof Error ? err.message : t(($) => $.resources.toast_attach_failed);
       toast.error(msg);
@@ -177,7 +281,6 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
         },
       });
       toast.success(t(($) => $.resources.toast_local_attached));
-      setAddOpen(false);
     } catch (err) {
       const msg =
         err instanceof Error
@@ -262,30 +365,26 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
               ))}
             </div>
           )}
-          <Popover
-            open={addOpen}
-            onOpenChange={(v) => {
-              setAddOpen(v);
-              if (!v) setRepoSearch("");
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              setAddOpen((value) => {
+                if (value) setRepoSearch("");
+                return !value;
+              });
             }}
           >
-            <PopoverTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  <Plus className="size-3" />
-                  {t(($) => $.resources.add_button)}
-                </Button>
-              }
-            />
-            <PopoverContent align="start" className="w-72 p-2 space-y-2">
+            <Plus className="size-3" />
+            {t(($) => $.resources.add_button)}
+          </Button>
+          {addOpen && (
+            <div className="space-y-2 rounded-md border bg-muted/10 p-2">
               <div className="text-xs font-medium text-muted-foreground">
                 {t(($) => $.resources.popover_title)}
               </div>
-              {workspace?.repos && workspace.repos.length > 0 && (
+              {enablement.github && workspace?.repos && workspace.repos.length > 0 && (
                 <>
                   <div className="relative">
                     <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -318,7 +417,6 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                           onClick={async () => {
                             if (isDisabled) return;
                             await handleAttach(repo.url);
-                            setAddOpen(false);
                           }}
                           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left hover:bg-accent transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent"
                         >
@@ -342,14 +440,74 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                   </div>
                 </>
               )}
-              <CustomRepoForm
-                onSubmit={async (url) => {
-                  await handleAttach(url);
-                  setAddOpen(false);
-                }}
-              />
-            </PopoverContent>
-          </Popover>
+              {enablement.github && (
+                <CustomRepoForm
+                  onSubmit={async (url) => {
+                    await handleAttach(url);
+                  }}
+                />
+              )}
+              {enablement.gitlab && (
+                <CustomRepoForm
+                  icon={<GitBranch className="size-3.5" />}
+                  title={t(($) => $.resources.gitlab_form_title)}
+                  placeholder={t(($) => $.resources.gitlab_url_placeholder)}
+                  submitLabel={t(($) => $.resources.gitlab_submit)}
+                  onSubmit={async (url) => {
+                    await handleAttachGitLab(url);
+                  }}
+                />
+              )}
+              {enablement.feishu && (
+                <>
+                  <ExternalResourceForm
+                    icon={<Cloud className="size-3.5" />}
+                    title={t(($) => $.resources.feishu_drive_form_title)}
+                    valuePlaceholder={t(($) => $.resources.feishu_drive_placeholder)}
+                    labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
+                    submitLabel={t(($) => $.resources.external_submit)}
+                    onSubmit={(value, label) =>
+                      handleAttachExternalResource("feishu_drive", value, label)
+                    }
+                  />
+                  <ExternalResourceForm
+                    icon={<BookOpen className="size-3.5" />}
+                    title={t(($) => $.resources.feishu_wiki_form_title)}
+                    valuePlaceholder={t(($) => $.resources.feishu_wiki_placeholder)}
+                    labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
+                    submitLabel={t(($) => $.resources.external_submit)}
+                    onSubmit={(value, label) =>
+                      handleAttachExternalResource("feishu_wiki", value, label)
+                    }
+                  />
+                </>
+              )}
+              {enablement.zentao && (
+                <>
+                  <ExternalResourceForm
+                    icon={<Kanban className="size-3.5" />}
+                    title={t(($) => $.resources.zentao_project_form_title)}
+                    valuePlaceholder={t(($) => $.resources.zentao_project_placeholder)}
+                    labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
+                    submitLabel={t(($) => $.resources.external_submit)}
+                    onSubmit={(value, label) =>
+                      handleAttachExternalResource("zentao_project", value, label)
+                    }
+                  />
+                  <ExternalResourceForm
+                    icon={<Kanban className="size-3.5" />}
+                    title={t(($) => $.resources.zentao_product_form_title)}
+                    valuePlaceholder={t(($) => $.resources.zentao_product_placeholder)}
+                    labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
+                    submitLabel={t(($) => $.resources.external_submit)}
+                    onSubmit={(value, label) =>
+                      handleAttachExternalResource("zentao_product", value, label)
+                    }
+                  />
+                </>
+              )}
+            </div>
+          )}
           {desktopMode && (
             <div className="flex flex-col">
               <Button
@@ -438,6 +596,19 @@ function ResourceRow({
     );
   }
 
+  if (isGitLabRef(resource)) {
+    const ref = resource.resource_ref;
+    return (
+      <LinkResourceRow
+        icon={<GitBranch className="size-3.5 text-muted-foreground shrink-0" />}
+        label={resource.label || ref.url}
+        href={ref.url}
+        tooltip={ref.url}
+        onRemove={onRemove}
+      />
+    );
+  }
+
   if (isLocalDirectoryRef(resource)) {
     return (
       <LocalDirectoryRow
@@ -446,6 +617,58 @@ function ResourceRow({
         canEdit={canEdit}
         onRemove={onRemove}
         onRename={onRenameLocalDirectory}
+      />
+    );
+  }
+
+  if (isFeishuDriveRef(resource)) {
+    const ref = resource.resource_ref;
+    return (
+      <ExternalResourceRow
+        icon={<Cloud className="size-3.5 text-muted-foreground shrink-0" />}
+        label={resource.label || ref.label || ref.drive_url || ref.folder_token || ref.node_token || t(($) => $.resources.feishu_drive_fallback)}
+        detail={ref.drive_url || ref.folder_token || ref.node_token || ""}
+        href={ref.drive_url}
+        onRemove={onRemove}
+      />
+    );
+  }
+
+  if (isFeishuWikiRef(resource)) {
+    const ref = resource.resource_ref;
+    return (
+      <ExternalResourceRow
+        icon={<BookOpen className="size-3.5 text-muted-foreground shrink-0" />}
+        label={resource.label || ref.label || ref.wiki_url || ref.space_id || ref.node_token || t(($) => $.resources.feishu_wiki_fallback)}
+        detail={ref.wiki_url || ref.space_id || ref.node_token || ""}
+        href={ref.wiki_url}
+        onRemove={onRemove}
+      />
+    );
+  }
+
+  if (isZenTaoProjectRef(resource)) {
+    const ref = resource.resource_ref;
+    return (
+      <ExternalResourceRow
+        icon={<Kanban className="size-3.5 text-muted-foreground shrink-0" />}
+        label={resource.label || ref.label || ref.project_key || ref.project_id || ref.url || t(($) => $.resources.zentao_project_fallback)}
+        detail={ref.url || ref.project_key || ref.project_id || ""}
+        href={ref.url}
+        onRemove={onRemove}
+      />
+    );
+  }
+
+  if (isZenTaoProductRef(resource)) {
+    const ref = resource.resource_ref;
+    return (
+      <ExternalResourceRow
+        icon={<Kanban className="size-3.5 text-muted-foreground shrink-0" />}
+        label={resource.label || ref.label || ref.product_key || ref.product_id || ref.url || t(($) => $.resources.zentao_product_fallback)}
+        detail={ref.url || ref.product_key || ref.product_id || ""}
+        href={ref.url}
+        onRemove={onRemove}
       />
     );
   }
@@ -462,6 +685,94 @@ function ResourceRow({
         title={t(($) => $.resources.remove_tooltip)}
       >
         <Trash2 className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+function LinkResourceRow({
+  icon,
+  label,
+  href,
+  tooltip,
+  onRemove,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  href: string;
+  tooltip: string;
+  onRemove: () => void;
+}) {
+  const { t } = useT("projects");
+  return (
+    <div className="flex items-center gap-2 text-xs group">
+      {icon}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="truncate flex-1 hover:underline"
+            >
+              {label}
+            </a>
+          }
+        />
+        <TooltipContent side="top">{tooltip}</TooltipContent>
+      </Tooltip>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="opacity-0 group-hover:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+        title={t(($) => $.resources.remove_tooltip)}
+      >
+        <Trash2 className="size-3 text-muted-foreground" />
+      </button>
+    </div>
+  );
+}
+
+function ExternalResourceRow({
+  icon,
+  label,
+  detail,
+  href,
+  onRemove,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  detail: string;
+  href?: string;
+  onRemove: () => void;
+}) {
+  const { t } = useT("projects");
+  const content = (
+    <span className="truncate flex-1 hover:underline">{label}</span>
+  );
+  return (
+    <div className="flex items-center gap-2 text-xs group">
+      {icon}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            href ? (
+              <a href={href} target="_blank" rel="noopener noreferrer" className="truncate flex-1 hover:underline">
+                {label}
+              </a>
+            ) : content
+          }
+        />
+        <TooltipContent side="top">{detail || label}</TooltipContent>
+      </Tooltip>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="opacity-0 group-hover:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+        title={t(($) => $.resources.remove_tooltip)}
+      >
+        <Trash2 className="size-3 text-muted-foreground" />
       </button>
     </div>
   );
@@ -583,8 +894,16 @@ function LocalDirectoryRow({
 }
 
 function CustomRepoForm({
+  icon,
+  title,
+  placeholder,
+  submitLabel,
   onSubmit,
 }: {
+  icon?: React.ReactNode;
+  title?: string;
+  placeholder?: string;
+  submitLabel?: string;
   onSubmit: (url: string) => Promise<void> | void;
 }) {
   const { t } = useT("projects");
@@ -603,23 +922,97 @@ function CustomRepoForm({
     }
   };
   return (
-    <form onSubmit={handle} className="flex items-center gap-1.5 pt-1 border-t">
+    <form onSubmit={handle} className="space-y-1.5 pt-2 border-t">
+      {title && (
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          {icon}
+          {title}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder={placeholder ?? t(($) => $.resources.url_placeholder)}
+          className="flex-1 bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+        />
+        <Button
+          type="submit"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-xs"
+          disabled={!url.trim() || submitting}
+        >
+          {submitLabel ?? t(($) => $.resources.url_submit)}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function ExternalResourceForm({
+  icon,
+  title,
+  valuePlaceholder,
+  labelPlaceholder,
+  submitLabel,
+  onSubmit,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  valuePlaceholder: string;
+  labelPlaceholder: string;
+  submitLabel: string;
+  onSubmit: (value: string, label: string) => Promise<void> | void;
+}) {
+  const [value, setValue] = useState("");
+  const [label, setLabel] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const handle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(trimmed, label.trim());
+      setValue("");
+      setLabel("");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <form onSubmit={handle} className="space-y-1.5 pt-2 border-t">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        {icon}
+        {title}
+      </div>
       <input
         type="text"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        placeholder={t(($) => $.resources.url_placeholder)}
-        className="flex-1 bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={valuePlaceholder}
+        className="w-full bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
       />
-      <Button
-        type="submit"
-        size="sm"
-        variant="ghost"
-        className="h-6 px-2 text-xs"
-        disabled={!url.trim() || submitting}
-      >
-        {t(($) => $.resources.url_submit)}
-      </Button>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder={labelPlaceholder}
+          className="flex-1 bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+        />
+        <Button
+          type="submit"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-xs"
+          disabled={!value.trim() || submitting}
+        >
+          {submitLabel}
+        </Button>
+      </div>
     </form>
   );
 }

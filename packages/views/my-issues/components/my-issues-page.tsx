@@ -24,7 +24,7 @@ import { useUpdateIssue } from "@multica/core/issues/mutations";
 import { myIssuesViewStore } from "@multica/core/issues/stores/my-issues-view-store";
 import { PageHeader } from "../../layout/page-header";
 import { useT } from "../../i18n";
-import { MyIssuesHeader } from "./my-issues-header";
+import { MyIssuesHeader, MyIssuesSyncSettingsButton } from "./my-issues-header";
 
 export function MyIssuesPage() {
   const { t } = useT("my-issues");
@@ -38,6 +38,7 @@ export function MyIssuesPage() {
   const sortBy = useStore(myIssuesViewStore, (s) => s.sortBy);
   const sortDirection = useStore(myIssuesViewStore, (s) => s.sortDirection);
   const agentRunningFilter = useStore(myIssuesViewStore, (s) => s.agentRunningFilter);
+  const sourceFilters = useStore(myIssuesViewStore, (s) => s.sourceFilters);
   const usesAssigneeBoard = viewMode === "board" && grouping === "assignee";
 
   const sort = useMemo(
@@ -140,8 +141,9 @@ export function MyIssuesPage() {
         labelFilters: [],
         agentRunningFilter,
         runningIssueIds,
+        sourceFilters,
       }),
-    [myIssues, statusFilters, priorityFilters, agentRunningFilter, runningIssueIds],
+    [myIssues, statusFilters, priorityFilters, agentRunningFilter, runningIssueIds, sourceFilters],
   );
 
   // Status-unfiltered companion for Swimlane.
@@ -158,9 +160,41 @@ export function MyIssuesPage() {
         labelFilters: [],
         agentRunningFilter,
         runningIssueIds,
+        sourceFilters,
       }),
-    [myIssues, priorityFilters, agentRunningFilter, runningIssueIds],
+    [myIssues, priorityFilters, agentRunningFilter, runningIssueIds, sourceFilters],
   );
+
+  const filteredAssigneeGroups = useMemo(() => {
+    if (!assigneeGroupsQuery.data?.groups) return undefined;
+    return assigneeGroupsQuery.data.groups
+      .map((group) => {
+        const groupIssues = filterIssues(group.issues, {
+          statusFilters,
+          priorityFilters,
+          assigneeFilters: [],
+          includeNoAssignee: false,
+          creatorFilters: [],
+          projectFilters: [],
+          includeNoProject: false,
+          labelFilters: [],
+          agentRunningFilter,
+          runningIssueIds,
+          sourceFilters,
+        });
+        return { ...group, issues: groupIssues, total: groupIssues.length };
+      })
+      .filter((group) => group.issues.length > 0);
+  }, [
+    agentRunningFilter,
+    assigneeGroupsQuery.data?.groups,
+    priorityFilters,
+    runningIssueIds,
+    sourceFilters,
+    statusFilters,
+  ]);
+  const clientFilteredAssigneeGroups =
+    sourceFilters.length > 0 || agentRunningFilter;
 
   const activeFilters = useMemo(() => ({
     priorityFilters,
@@ -249,6 +283,7 @@ export function MyIssuesPage() {
       <PageHeader className="gap-2">
         <ListTodo className="h-4 w-4 text-muted-foreground" />
         <h1 className="text-sm font-medium">{t(($) => $.page.breadcrumb)}</h1>
+        <MyIssuesSyncSettingsButton />
       </PageHeader>
 
       <ViewStoreProvider store={myIssuesViewStore}>
@@ -264,10 +299,10 @@ export function MyIssuesPage() {
           <div className="flex flex-col flex-1 min-h-0">
             {viewMode === "board" ? (
               <BoardView
-                issues={usesAssigneeBoard ? myIssues : issues}
-                assigneeGroups={usesAssigneeBoard ? assigneeGroupsQuery.data?.groups : undefined}
-                assigneeGroupQueryKey={usesAssigneeBoard ? assigneeGroupsOptions.queryKey : undefined}
-                assigneeGroupFilter={usesAssigneeBoard ? assigneeGroupFilter : undefined}
+                issues={issues}
+                assigneeGroups={usesAssigneeBoard ? filteredAssigneeGroups : undefined}
+                assigneeGroupQueryKey={usesAssigneeBoard && !clientFilteredAssigneeGroups ? assigneeGroupsOptions.queryKey : undefined}
+                assigneeGroupFilter={usesAssigneeBoard && !clientFilteredAssigneeGroups ? assigneeGroupFilter : undefined}
                 visibleStatuses={visibleStatuses}
                 hiddenStatuses={hiddenStatuses}
                 onMoveIssue={handleMoveIssue}

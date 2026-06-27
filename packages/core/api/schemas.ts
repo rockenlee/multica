@@ -15,6 +15,8 @@ import type {
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
   GroupedIssuesResponse,
+  IssueOutboundSyncResponse,
+  ListIntegrationsResponse,
   ListIssuesResponse,
   ListWebhookDeliveriesResponse,
   Squad,
@@ -258,6 +260,123 @@ export const ListIssuesResponseSchema = z.object({
 export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
   issues: [],
   total: 0,
+};
+
+const JsonObjectSchema = z.record(z.string(), z.unknown()).default({});
+
+const IntegrationConnectionSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  provider: z.string(),
+  name: z.string().default(""),
+  base_url: z.string().nullable().optional(),
+  config: JsonObjectSchema,
+  status: z.string().default("active"),
+  sync_enabled: BooleanWithDefaultSchema(false),
+  created_by_user_id: z.string().nullable().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+const IntegrationUserAccountSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  connection_id: z.string(),
+  user_id: z.string(),
+  account_key: z.string().default("default"),
+  account_name: z.string().default("Default"),
+  external_user_id: z.string().nullable().optional(),
+  external_username: z.string().nullable().optional(),
+  credential_configured: BooleanWithDefaultSchema(false),
+  scopes: z.array(z.string()).default([]),
+  config: JsonObjectSchema,
+  status: z.string().default("active"),
+  sync_enabled: BooleanWithDefaultSchema(false),
+  expires_at: z.string().nullable().optional(),
+  last_used_at: z.string().nullable().optional(),
+  last_error: z.string().nullable().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+const IntegrationProjectBindingSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  project_id: z.string(),
+  connection_id: z.string(),
+  external_ref: JsonObjectSchema,
+  inbound_enabled: BooleanWithDefaultSchema(false),
+  outbound_enabled: BooleanWithDefaultSchema(false),
+  issue_sync_enabled: BooleanWithDefaultSchema(false),
+  knowledge_sync_enabled: BooleanWithDefaultSchema(false),
+  created_by_user_id: z.string().nullable().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const IntegrationIssueSyncSettingSchema = z.object({
+  workspace_id: z.string(),
+  user_id: z.string(),
+  provider: z.string(),
+  inbound_enabled: BooleanWithDefaultSchema(false),
+  outbound_enabled: BooleanWithDefaultSchema(false),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+const IntegrationSyncEventSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  connection_id: z.string().nullable().optional(),
+  provider: z.string(),
+  direction: z.string().default("internal"),
+  object_type: z.string().default(""),
+  object_id: z.string().nullable().optional(),
+  external_id: z.string().nullable().optional(),
+  external_url: z.string().nullable().optional(),
+  project_id: z.string().nullable().optional(),
+  status: z.string().default("success"),
+  message: z.string().nullable().optional(),
+  error: z.string().nullable().optional(),
+  metadata: JsonObjectSchema,
+  occurred_at: z.string().default(""),
+  created_at: z.string().default(""),
+}).loose();
+
+export const ListIntegrationsResponseSchema = z.object({
+  connections: z.array(IntegrationConnectionSchema).default([]),
+  accounts: z.array(IntegrationUserAccountSchema).default([]),
+  project_bindings: z.array(IntegrationProjectBindingSchema).default([]),
+  issue_sync_settings: z.array(IntegrationIssueSyncSettingSchema).default([]),
+  sync_events: z.array(IntegrationSyncEventSchema).default([]),
+  credential_storage_enabled: BooleanWithDefaultSchema(false),
+}).loose();
+
+export const EMPTY_LIST_INTEGRATIONS_RESPONSE: ListIntegrationsResponse = {
+  connections: [],
+  accounts: [],
+  project_bindings: [],
+  issue_sync_settings: [],
+  sync_events: [],
+  credential_storage_enabled: false,
+};
+
+export const IssueOutboundSyncResponseSchema = z.object({
+  issue_id: z.string(),
+  project_id: z.string().nullable().optional(),
+  status: z.string().default("skipped"),
+  provider: z.string().nullable().optional(),
+  connection_id: z.string().nullable().optional(),
+  message: z.string().default(""),
+  metadata: JsonObjectSchema,
+  event: IntegrationSyncEventSchema.optional(),
+}).loose();
+
+export const EMPTY_ISSUE_OUTBOUND_SYNC_RESPONSE: IssueOutboundSyncResponse = {
+  issue_id: "",
+  status: "skipped",
+  message: "",
+  metadata: {},
 };
 
 const IssueAssigneeGroupSchema = z.object({
