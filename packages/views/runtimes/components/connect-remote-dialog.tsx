@@ -29,12 +29,26 @@ const INSTALL_CMD =
   "curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash";
 const CLOUD_SERVER_URL = "https://api.multica.ai";
 const CLOUD_APP_URL = "https://multica.ai";
+const CLOUD_HOSTS = ["multica.ai", "www.multica.ai"];
 
 function normalizeCommandURL(url: string | undefined) {
   return url?.trim().replace(/\/+$/, "") ?? "";
 }
 
-function daemonCommands(serverUrl: string | undefined, appUrl: string | undefined) {
+function currentOriginSafe(): string {
+  return typeof window === "undefined" ? "" : window.location.origin;
+}
+
+function isManagedCloudOrigin(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname;
+    return CLOUD_HOSTS.includes(host) || host.endsWith(".multica.ai");
+  } catch {
+    return false;
+  }
+}
+
+function daemonCommands(serverUrl: string | undefined, appUrl: string | undefined, currentOrigin: string) {
   const normalizedServerUrl = normalizeCommandURL(serverUrl);
   const normalizedAppUrl = normalizeCommandURL(appUrl);
   if (normalizedServerUrl && normalizedAppUrl) {
@@ -47,10 +61,27 @@ multica daemon start`,
     };
   }
 
+  // No daemon_server_url / daemon_app_url from /api/config.
+  // /api/config deliberately omits these for the managed cloud AND for
+  // unconfigured self-host deployments (see workspace-url.ts).
+  // • Managed cloud origin → fall back to the official cloud URLs.
+  // • Self-host / local / unknown origin → use the current origin so users
+  //   aren't silently pointed at the managed cloud.
+  if (!currentOrigin || isManagedCloudOrigin(currentOrigin)) {
+    return {
+      setupCmd: "multica setup",
+      tokenCmd: `multica config set server_url ${CLOUD_SERVER_URL}
+multica config set app_url ${CLOUD_APP_URL}
+multica login --token <YOUR_TOKEN>
+multica daemon start`,
+    };
+  }
+
+  const origin = normalizeCommandURL(currentOrigin);
   return {
     setupCmd: "multica setup",
-    tokenCmd: `multica config set server_url ${CLOUD_SERVER_URL}
-multica config set app_url ${CLOUD_APP_URL}
+    tokenCmd: `multica config set server_url ${origin}
+multica config set app_url ${origin}
 multica login --token <YOUR_TOKEN>
 multica daemon start`,
   };
@@ -192,7 +223,7 @@ function InstructionsStep({ onClose }: { onClose: () => void }) {
   const { t } = useT("runtimes");
   const daemonServerUrl = useConfigStore((s) => s.daemonServerUrl);
   const daemonAppUrl = useConfigStore((s) => s.daemonAppUrl);
-  const { setupCmd, tokenCmd } = daemonCommands(daemonServerUrl, daemonAppUrl);
+  const { setupCmd, tokenCmd } = daemonCommands(daemonServerUrl, daemonAppUrl, currentOriginSafe());
   return (
     <>
       <DialogHeader className="px-6 pt-6 pb-2">

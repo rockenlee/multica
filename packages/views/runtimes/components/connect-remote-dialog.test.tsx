@@ -66,17 +66,43 @@ const ligatureClasses = [
 ];
 
 describe("ConnectRemoteDialog", () => {
-  it("uses cloud setup commands by default", () => {
+  it("self-host/local without config: tokenCmd uses current origin, not cloud", () => {
+    // jsdom default origin = http://localhost (not a managed cloud host)
     const { baseElement } = renderDialog();
 
     expect(baseElement).toHaveTextContent("multica setup");
     expect(baseElement).not.toHaveTextContent("multica setup self-host");
     expect(baseElement).toHaveTextContent(
-      "multica config set server_url https://api.multica.ai",
+      "multica config set server_url http://localhost",
     );
     expect(baseElement).toHaveTextContent(
-      "multica config set app_url https://multica.ai",
+      "multica config set app_url http://localhost",
     );
+    expect(baseElement).not.toHaveTextContent("https://api.multica.ai");
+  });
+
+  it("managed cloud without config: tokenCmd uses official cloud URLs", () => {
+    // Simulate a managed cloud origin — /api/config deliberately omits
+    // daemon_server_url / daemon_app_url for the managed cloud.
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, origin: "https://multica.ai" },
+      writable: true,
+    });
+    try {
+      const { baseElement } = renderDialog();
+
+      expect(baseElement).toHaveTextContent(
+        "multica config set server_url https://api.multica.ai",
+      );
+      expect(baseElement).toHaveTextContent(
+        "multica config set app_url https://multica.ai",
+      );
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: { ...window.location, origin: "http://localhost" },
+        writable: true,
+      });
+    }
   });
 
   it("uses self-host daemon URLs from runtime config", () => {
