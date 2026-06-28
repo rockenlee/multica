@@ -73,6 +73,9 @@ describe("ConnectRemoteDialog", () => {
     expect(baseElement).toHaveTextContent("multica setup");
     expect(baseElement).not.toHaveTextContent("multica setup self-host");
     expect(baseElement).toHaveTextContent(
+      "https://raw.githubusercontent.com/rockenlee/multica/main/scripts/install.sh",
+    );
+    expect(baseElement).toHaveTextContent(
       "multica config set server_url http://localhost",
     );
     expect(baseElement).toHaveTextContent(
@@ -97,6 +100,9 @@ describe("ConnectRemoteDialog", () => {
       expect(baseElement).toHaveTextContent(
         "multica config set app_url https://multica.ai",
       );
+      expect(baseElement).toHaveTextContent(
+        "https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh",
+      );
     } finally {
       Object.defineProperty(window, "location", {
         value: { ...window.location, origin: "http://localhost" },
@@ -113,6 +119,9 @@ describe("ConnectRemoteDialog", () => {
 
     expect(baseElement).toHaveTextContent(
       "multica setup self-host --server-url https://api.example.com --app-url https://app.example.com",
+    );
+    expect(baseElement).toHaveTextContent(
+      "https://raw.githubusercontent.com/rockenlee/multica/main/scripts/install.sh",
     );
     expect(baseElement).toHaveTextContent(
       "multica config set server_url https://api.example.com",

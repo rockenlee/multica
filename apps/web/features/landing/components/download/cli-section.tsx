@@ -5,16 +5,18 @@ import { Check, Copy, Terminal } from "lucide-react";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { useLocale } from "../../i18n";
 
-const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash";
-const SETUP_CMD = "multica setup";
-
 /**
  * Scenario-first CLI section. Copy leans into servers / remote dev
  * boxes / headless setups rather than positioning CLI as a
  * lightweight Desktop. Two copy-and-paste command blocks.
  */
-export function CliSection() {
+export function CliSection({
+  installCommand,
+  setupCommand,
+}: {
+  installCommand: string;
+  setupCommand: string;
+}) {
   const { t } = useLocale();
   const d = t.download.cli;
 
@@ -31,13 +33,13 @@ export function CliSection() {
         <div className="mt-10 flex flex-col gap-5">
           <CommandBlock
             label={d.installLabel}
-            cmd={INSTALL_CMD}
+            cmd={installCommand}
             copyLabel={d.copyLabel}
             copiedLabel={d.copiedLabel}
           />
           <CommandBlock
             label={d.startLabel}
-            cmd={SETUP_CMD}
+            cmd={setupCommand}
             copyLabel={d.copyLabel}
             copiedLabel={d.copiedLabel}
           />

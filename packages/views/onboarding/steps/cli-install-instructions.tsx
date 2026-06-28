@@ -6,11 +6,58 @@ import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { CODE_LIGATURE_CLASS } from "@multica/ui/lib/code-style";
 import { cn } from "@multica/ui/lib/utils";
 import { copyText } from "@multica/ui/lib/clipboard";
+import { useConfigStore } from "@multica/core/config";
 import { useT } from "../../i18n";
 
-const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash";
-const SETUP_CMD = "multica setup";
+const CLOUD_RELEASE_REPO = "multica-ai/multica";
+const SELF_HOST_RELEASE_REPO = "rockenlee/multica";
+const CLOUD_HOSTS = ["multica.ai", "www.multica.ai"];
+
+function currentOriginSafe(): string {
+  return typeof window === "undefined" ? "" : window.location.origin;
+}
+
+function normalizeCommandURL(url: string | undefined) {
+  return url?.trim().replace(/\/+$/, "") ?? "";
+}
+
+function isManagedCloudOrigin(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname;
+    return CLOUD_HOSTS.includes(host) || host.endsWith(".multica.ai");
+  } catch {
+    return false;
+  }
+}
+
+function cliCommands(
+  serverUrl: string | undefined,
+  appUrl: string | undefined,
+  currentOrigin: string,
+) {
+  const normalizedServerUrl = normalizeCommandURL(serverUrl);
+  const normalizedAppUrl = normalizeCommandURL(appUrl);
+  const currentOriginIsCloud = !currentOrigin || isManagedCloudOrigin(currentOrigin);
+  const releaseRepo = currentOriginIsCloud ? CLOUD_RELEASE_REPO : SELF_HOST_RELEASE_REPO;
+  const installCmd = `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/main/scripts/install.sh | bash`;
+
+  if (normalizedServerUrl && normalizedAppUrl) {
+    return {
+      installCmd,
+      setupCmd: `multica setup self-host --server-url ${normalizedServerUrl} --app-url ${normalizedAppUrl}`,
+    };
+  }
+
+  if (currentOriginIsCloud) {
+    return { installCmd, setupCmd: "multica setup" };
+  }
+
+  const origin = normalizeCommandURL(currentOrigin);
+  return {
+    installCmd,
+    setupCmd: `multica setup self-host --server-url ${origin} --app-url ${origin}`,
+  };
+}
 
 function CopyButton({ text }: { text: string }) {
   const { t } = useT("onboarding");
@@ -62,24 +109,23 @@ function Step({ n, label, cmd }: { n: number; label: string; cmd: string }) {
   );
 }
 
-/**
- * CLI install instructions — two copy-and-run commands. Hardcoded because
- * there's nothing environmental to infer: step 1 is the public install
- * script, step 2 is the cloud `multica setup` which the CLI itself knows
- * the endpoints for. Local development tests a self-host variant by
- * typing the extended command directly in the terminal; no need to
- * thread env vars through React.
- */
 export function CliInstallInstructions() {
   const { t } = useT("onboarding");
+  const daemonServerUrl = useConfigStore((s) => s.daemonServerUrl);
+  const daemonAppUrl = useConfigStore((s) => s.daemonAppUrl);
+  const { installCmd, setupCmd } = cliCommands(
+    daemonServerUrl,
+    daemonAppUrl,
+    currentOriginSafe(),
+  );
   return (
     <Card className="w-full">
       <CardContent className="space-y-4 pt-4">
         <p className="text-xs leading-[1.55] text-muted-foreground">
           {t(($) => $.cli_install.intro)}
         </p>
-        <Step n={1} label={t(($) => $.cli_install.step1_label)} cmd={INSTALL_CMD} />
-        <Step n={2} label={t(($) => $.cli_install.step2_label)} cmd={SETUP_CMD} />
+        <Step n={1} label={t(($) => $.cli_install.step1_label)} cmd={installCmd} />
+        <Step n={2} label={t(($) => $.cli_install.step2_label)} cmd={setupCmd} />
       </CardContent>
     </Card>
   );

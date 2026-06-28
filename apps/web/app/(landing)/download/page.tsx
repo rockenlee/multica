@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { fetchLatestRelease } from "@/features/landing/utils/github-release";
+import {
+  originFromHeaders,
+  resolveDownloadSource,
+} from "@/features/landing/utils/download-source";
 import { DownloadClient } from "./download-client";
 
 // Vercel ISR: the server fetch inside fetchLatestRelease carries
@@ -24,6 +29,10 @@ export const metadata: Metadata = {
 };
 
 export default async function DownloadPage() {
-  const release = await fetchLatestRelease();
-  return <DownloadClient release={release} />;
+  const headerList = await headers();
+  const downloadSource = resolveDownloadSource({
+    origin: originFromHeaders(headerList),
+  });
+  const release = await fetchLatestRelease(downloadSource.releaseRepo);
+  return <DownloadClient release={release} downloadSource={downloadSource} />;
 }

@@ -50,7 +50,7 @@ afterEach(() => {
 
 describe("fetchLatestRelease", () => {
   it("uses previous release when latest was published within the fresh window", async () => {
-    mockFetchWithReleases([
+    const fetchMock = mockFetchWithReleases([
       releasePayload({
         tag: "v0.2.14",
         publishedMinutesAgo: 10,
@@ -66,6 +66,27 @@ describe("fetchLatestRelease", () => {
     const result = await fetchLatestRelease();
     expect(result.version).toBe("v0.2.13");
     expect(result.assets.macArm64Dmg).toBe(SAMPLE_PREV_ASSET.browser_download_url);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/multica-ai/multica/releases?per_page=2",
+      expect.any(Object),
+    );
+  });
+
+  it("fetches releases from the requested GitHub repo", async () => {
+    const fetchMock = mockFetchWithReleases([
+      releasePayload({
+        tag: "v0.2.14",
+        publishedMinutesAgo: 120,
+        asset: SAMPLE_LATEST_ASSET,
+      }),
+    ]);
+
+    await fetchLatestRelease("rockenlee/multica");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/rockenlee/multica/releases?per_page=2",
+      expect.any(Object),
+    );
   });
 
   it("uses latest release once it is older than the fresh window", async () => {

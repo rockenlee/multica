@@ -25,8 +25,8 @@ import { useT } from "../../i18n";
 
 type Step = "instructions" | "success";
 
-const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash";
+const CLOUD_RELEASE_REPO = "multica-ai/multica";
+const SELF_HOST_RELEASE_REPO = "rockenlee/multica";
 const CLOUD_SERVER_URL = "https://api.multica.ai";
 const CLOUD_APP_URL = "https://multica.ai";
 const CLOUD_HOSTS = ["multica.ai", "www.multica.ai"];
@@ -48,11 +48,16 @@ function isManagedCloudOrigin(origin: string): boolean {
   }
 }
 
+function installCommand(releaseRepo: string): string {
+  return `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/main/scripts/install.sh | bash`;
+}
+
 function daemonCommands(serverUrl: string | undefined, appUrl: string | undefined, currentOrigin: string) {
   const normalizedServerUrl = normalizeCommandURL(serverUrl);
   const normalizedAppUrl = normalizeCommandURL(appUrl);
   if (normalizedServerUrl && normalizedAppUrl) {
     return {
+      installCmd: installCommand(SELF_HOST_RELEASE_REPO),
       setupCmd: `multica setup self-host --server-url ${normalizedServerUrl} --app-url ${normalizedAppUrl}`,
       tokenCmd: `multica config set server_url ${normalizedServerUrl}
 multica config set app_url ${normalizedAppUrl}
@@ -69,6 +74,7 @@ multica daemon start`,
   //   aren't silently pointed at the managed cloud.
   if (!currentOrigin || isManagedCloudOrigin(currentOrigin)) {
     return {
+      installCmd: installCommand(CLOUD_RELEASE_REPO),
       setupCmd: "multica setup",
       tokenCmd: `multica config set server_url ${CLOUD_SERVER_URL}
 multica config set app_url ${CLOUD_APP_URL}
@@ -79,6 +85,7 @@ multica daemon start`,
 
   const origin = normalizeCommandURL(currentOrigin);
   return {
+    installCmd: installCommand(SELF_HOST_RELEASE_REPO),
     setupCmd: "multica setup",
     tokenCmd: `multica config set server_url ${origin}
 multica config set app_url ${origin}
@@ -223,7 +230,7 @@ function InstructionsStep({ onClose }: { onClose: () => void }) {
   const { t } = useT("runtimes");
   const daemonServerUrl = useConfigStore((s) => s.daemonServerUrl);
   const daemonAppUrl = useConfigStore((s) => s.daemonAppUrl);
-  const { setupCmd, tokenCmd } = daemonCommands(daemonServerUrl, daemonAppUrl, currentOriginSafe());
+  const { installCmd, setupCmd, tokenCmd } = daemonCommands(daemonServerUrl, daemonAppUrl, currentOriginSafe());
   return (
     <>
       <DialogHeader className="px-6 pt-6 pb-2">
@@ -240,7 +247,7 @@ function InstructionsStep({ onClose }: { onClose: () => void }) {
           <CommandStep
             n={1}
             label={t(($) => $.connect.step1_label)}
-            cmd={INSTALL_CMD}
+            cmd={installCmd}
             copyAria={t(($) => $.connect.copy_aria)}
           />
 
@@ -301,7 +308,6 @@ function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {
           <li className="flex items-center gap-1.5">
             <span>{t(($) => $.connect.trouble_check_status)}</span>
             {/* CLI command — literal shell string, not i18n content. */}
-            {/* eslint-disable-next-line i18next/no-literal-string */}
             <code
               className={cn(
                 "rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground",
@@ -314,7 +320,6 @@ function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {
           <li className="flex items-center gap-1.5">
             <span>{t(($) => $.connect.trouble_view_logs)}</span>
             {/* CLI command — literal shell string, not i18n content. */}
-            {/* eslint-disable-next-line i18next/no-literal-string */}
             <code
               className={cn(
                 "rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground",
