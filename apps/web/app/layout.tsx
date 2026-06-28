@@ -115,7 +115,7 @@ export default async function RootLayout({
       suppressHydrationWarning
       className={cn("antialiased font-sans h-full", inter.variable, geistMono.variable, sourceSerif.variable)}
     >
-      <body className="h-full overflow-hidden">
+      <body className="h-full overflow-hidden" suppressHydrationWarning>
         <ThemeProvider>
           <WebProviders locale={locale} resources={resources}>
             {children}

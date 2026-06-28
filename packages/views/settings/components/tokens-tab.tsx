@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { Key, Trash2, Copy, Check } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
@@ -45,6 +45,68 @@ import { useT } from "../../i18n";
 import { ConnectionStatusBadge, type ConnectionStatus } from "./connection-status";
 
 const EXPIRY_KEYS = ["30", "90", "365", "never"] as const;
+const FEISHU_OAUTH_ACCOUNT_KEY = "feishuuseroauth";
+const EMPTY_CONNECTIONS: IntegrationConnection[] = [];
+const EMPTY_ACCOUNTS: IntegrationUserAccount[] = [];
+
+function normalizeExternalIdentity(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function normalizeAccountKeyIdentity(value: unknown) {
+  return normalizeExternalIdentity(value).replace(/[-_\s]/g, "");
+}
+
+function configString(config: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = config[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function isFeishuOAuthUserAccount(
+  connection: IntegrationConnection,
+  account: IntegrationUserAccount,
+) {
+  if (connection.provider !== "feishu") return false;
+  return normalizeAccountKeyIdentity(account.account_key) === FEISHU_OAUTH_ACCOUNT_KEY;
+}
+
+function feishuOAuthDedupeKey(
+  connection: IntegrationConnection,
+  account: IntegrationUserAccount,
+) {
+  const appIdentity = configString(connection.config, ["app_id", "appId", "client_id", "clientId"]) || connection.id;
+  const userIdentity =
+    normalizeAccountKeyIdentity(account.external_user_id) ||
+    normalizeAccountKeyIdentity(account.external_username) ||
+    normalizeAccountKeyIdentity(account.account_key);
+  return `${connection.provider}:${normalizeExternalIdentity(appIdentity)}:${userIdentity}`;
+}
+
+function visibleExternalAccountsByConnection(
+  connections: IntegrationConnection[],
+  accounts: IntegrationUserAccount[],
+) {
+  const seenFeishuOAuth = new Set<string>();
+  const byConnection = new Map<string, IntegrationUserAccount[]>();
+
+  for (const connection of connections) {
+    const visible: IntegrationUserAccount[] = [];
+    for (const account of accounts.filter((item) => item.connection_id === connection.id)) {
+      if (isFeishuOAuthUserAccount(connection, account)) {
+        const key = feishuOAuthDedupeKey(connection, account);
+        if (seenFeishuOAuth.has(key)) continue;
+        seenFeishuOAuth.add(key);
+      }
+      visible.push(account);
+    }
+    byConnection.set(connection.id, visible);
+  }
+
+  return byConnection;
+}
 
 export function TokensTab() {
   const { t } = useT("settings");
@@ -263,8 +325,12 @@ function ExternalAccountsSection() {
   const { t } = useT("settings");
   const wsId = useWorkspaceId();
   const { data, isLoading } = useQuery(integrationsOptions(wsId));
-  const connections = data?.connections ?? [];
-  const accounts = data?.accounts ?? [];
+  const connections = data?.connections ?? EMPTY_CONNECTIONS;
+  const accounts = data?.accounts ?? EMPTY_ACCOUNTS;
+  const visibleAccounts = useMemo(
+    () => visibleExternalAccountsByConnection(connections, accounts),
+    [connections, accounts],
+  );
 
   return (
     <section className="space-y-4">
@@ -288,9 +354,7 @@ function ExternalAccountsSection() {
           ) : (
             <div className="space-y-4">
               {connections.map((connection) => {
-                const connectionAccounts = accounts.filter(
-                  (item) => item.connection_id === connection.id,
-                );
+                const connectionAccounts = visibleAccounts.get(connection.id) ?? [];
                 return (
                   <div key={connection.id} className="space-y-2">
                     {connectionAccounts.map((account) => (
@@ -594,24 +658,34 @@ function ExternalAccountRow({
               : t(($) => $.tokens.external_accounts_save)}
           </Button>
           {account && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setDisconnectOpen(true)}
-              disabled={deleting}
-            >
-              {t(($) => $.integrations.disconnect)}
-            </Button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => setDisconnectOpen(true)}
+                    disabled={deleting}
+                    aria-label={t(($) => $.tokens.external_accounts_delete_aria, {
+                      name: account.account_name || connection.name,
+                    })}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                }
+              />
+              <TooltipContent>{t(($) => $.tokens.external_accounts_remove_tooltip)}</TooltipContent>
+            </Tooltip>
           )}
         </div>
       </div>
       <AlertDialog open={disconnectOpen} onOpenChange={setDisconnectOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t(($) => $.tokens.external_accounts_disconnect_title)}</AlertDialogTitle>
+            <AlertDialogTitle>{t(($) => $.tokens.external_accounts_remove_title)}</AlertDialogTitle>
             <AlertDialogDescription>
-              {t(($) => $.tokens.external_accounts_disconnect_desc)}
+              {t(($) => $.tokens.external_accounts_remove_desc)}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -623,7 +697,7 @@ function ExternalAccountRow({
                 await deleteAccount();
               }}
             >
-              {t(($) => $.integrations.disconnect)}
+              {t(($) => $.tokens.external_accounts_remove)}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -190,6 +190,30 @@ describe("GitHubTab", () => {
     });
   });
 
+  it("opens the GitHub App installation page from the workspace connect endpoint", async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    mockGetConnectURL.mockResolvedValue({
+      configured: true,
+      url: "https://github.com/apps/multica/installations/new?state=signed-state",
+    });
+
+    render(<GitHubTab />, { wrapper: I18nWrapper });
+
+    await user.click(screen.getByRole("button", { name: /^Install GitHub App$/ }));
+
+    await waitFor(() => {
+      expect(mockGetConnectURL).toHaveBeenCalledWith("workspace-1");
+      expect(openSpy).toHaveBeenCalledWith(
+        "https://github.com/apps/multica/installations/new?state=signed-state",
+        "_blank",
+        "noopener",
+      );
+    });
+
+    openSpy.mockRestore();
+  });
+
   it("clicking Disconnect opens the confirmation and only fires on confirm", async () => {
     const user = userEvent.setup();
     installationsRef.current = {
@@ -237,7 +261,7 @@ describe("GitHubTab", () => {
 
     expect(screen.getByText(/Connected to acme/i)).toBeTruthy();
     expect(screen.getByText(/Read-only view\./i)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Connect GitHub$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Install GitHub App$/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Disconnect$/ })).toBeNull();
   });
 
@@ -251,7 +275,7 @@ describe("GitHubTab", () => {
     render(<GitHubTab />, { wrapper: I18nWrapper });
 
     expect(screen.getByText(/Ask an admin or owner/i)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Connect GitHub$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Install GitHub App$/ })).toBeNull();
   });
 
   it("renders the connected_by line when the backend provides it", () => {
