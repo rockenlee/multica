@@ -55,6 +55,8 @@ _run_installer() {
   local err="$tmp/install.err"
   if ! PATH="$tmp/stub-bin:$tmp/install-bin:/usr/bin:/bin" \
     MULTICA_BIN_DIR="$tmp/install-bin" \
+    MULTICA_BREW_PACKAGE="multica-ai/tap/multica" \
+    MULTICA_BREW_TAP="multica-ai/tap" \
     MULTICA_TEST_ARCHIVE="$tmp/multica.tar.gz" \
     bash "$ROOT_DIR/scripts/install.sh" >"$out" 2>"$err"; then
     echo "install.sh exited non-zero" >&2

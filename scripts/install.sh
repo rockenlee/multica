@@ -18,7 +18,8 @@ MULTICA_RELEASE_REPO="${MULTICA_RELEASE_REPO:-rockenlee/multica}"
 REPO_URL="${MULTICA_REPO_URL:-https://github.com/${MULTICA_RELEASE_REPO}.git}"
 REPO_WEB_URL="${MULTICA_REPO_WEB_URL:-https://github.com/${MULTICA_RELEASE_REPO}}"  # without .git, for GitHub web APIs
 INSTALL_DIR="${MULTICA_INSTALL_DIR:-$HOME/.multica/server}"
-BREW_PACKAGE="multica-ai/tap/multica"
+BREW_PACKAGE="${MULTICA_BREW_PACKAGE:-}"
+BREW_TAP="${MULTICA_BREW_TAP:-}"
 
 # Colors (disabled when not a terminal)
 if [ -t 1 ] || [ -t 2 ]; then
@@ -113,10 +114,14 @@ _dump_brew_log() {
 }
 
 install_cli_brew() {
+  if [ -z "$BREW_PACKAGE" ]; then
+    return 1
+  fi
+
   info "Installing Multica CLI via Homebrew..."
   local brew_log
   brew_log=$(mktemp)
-  if ! brew tap multica-ai/tap >"$brew_log" 2>&1; then
+  if [ -n "$BREW_TAP" ] && ! brew tap "$BREW_TAP" >"$brew_log" 2>&1; then
     warn "Failed to add Homebrew tap. Falling back to GitHub Releases binary install."
     _dump_brew_log "$brew_log"
     rm -f "$brew_log"
@@ -250,6 +255,10 @@ pull_official_selfhost_images() {
 }
 
 upgrade_cli_brew() {
+  if [ -z "$BREW_PACKAGE" ]; then
+    return 1
+  fi
+
   info "Upgrading Multica CLI via Homebrew..."
   brew update 2>/dev/null || true
   if brew upgrade "$BREW_PACKAGE" 2>/dev/null; then
@@ -279,7 +288,7 @@ install_cli() {
     fi
 
     info "Multica CLI $current_ver installed, latest is $latest_ver — upgrading..."
-    if command_exists brew && brew list "$BREW_PACKAGE" >/dev/null 2>&1; then
+    if [ -n "$BREW_PACKAGE" ] && command_exists brew && brew list "$BREW_PACKAGE" >/dev/null 2>&1; then
       upgrade_cli_brew
     else
       install_cli_binary
@@ -291,7 +300,7 @@ install_cli() {
     return 0
   fi
 
-  if command_exists brew; then
+  if [ -n "$BREW_PACKAGE" ] && command_exists brew; then
     install_cli_brew || install_cli_binary
   else
     install_cli_binary
@@ -522,6 +531,11 @@ main() {
         echo "                        (default: /usr/local/bin, then \$HOME/.local/bin)"
         echo "  MULTICA_SELFHOST_REF  Git ref to check out for self-host assets"
         echo "                        (default: latest release tag, falling back to main)"
+        echo "  MULTICA_RELEASE_REPO  GitHub release repo for installer assets"
+        echo "                        (default: rockenlee/multica)"
+        echo "  MULTICA_BREW_PACKAGE  Optional Homebrew formula to use instead of"
+        echo "                        the GitHub release binary path"
+        echo "  MULTICA_BREW_TAP      Optional Homebrew tap to add before installing"
         echo ""
         echo "After installation, run 'multica setup' to configure your environment."
         exit 0
