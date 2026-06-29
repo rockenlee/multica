@@ -721,6 +721,10 @@ func (h *Handler) SyncInboundIntegrationIssue(w http.ResponseWriter, r *http.Req
 		assigneeID = parsed
 	}
 
+	// A user-initiated inbound (re-)sync is an explicit "I want this item" action
+	// — clear any prior deletion tombstone so the mirror can be recreated.
+	_, _ = h.DB.Exec(r.Context(), `DELETE FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_id=$3`, wsUUID, connection.Provider, sourceID)
+
 	issue, status, event, err := h.upsertInboundIntegrationIssue(r.Context(), connection, userUUID, assigneeID, projectID, resourceID, title, req.Description, sourceType, sourceID, sourceURL, externalStatus)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -845,6 +849,30 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	descriptionText := ptrToText(trimStringPtr(description))
 
 	if isNewIssue {
+		// Suppression: if a user previously deleted this external mirror, a
+		// tombstone exists — do NOT resurrect it on the next inbound poll. Record
+		// a skipped inbound event via the pool (not qtx) so it survives this tx's
+		// rollback. Manual re-sync clears the tombstone first, so this only blocks
+		// automatic recreation.
+		var tombstoned bool
+		if e := h.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_id=$3)`,
+			connection.WorkspaceID, connection.Provider, sourceID).Scan(&tombstoned); e == nil && tombstoned {
+			msg := "Inbound suppressed: mirror was deleted by a user (tombstoned)"
+			_, _ = h.Queries.CreateIntegrationSyncEvent(ctx, db.CreateIntegrationSyncEventParams{
+				WorkspaceID:  connection.WorkspaceID,
+				ConnectionID: connection.ID,
+				Provider:     connection.Provider,
+				Direction:    "inbound",
+				ObjectType:   sourceType,
+				ObjectID:     ptrToText(&sourceID),
+				ExternalID:   ptrToText(&sourceID),
+				ProjectID:    projectID,
+				Status:       "skipped",
+				Message:      ptrToText(&msg),
+				Metadata:     []byte("{}"),
+			})
+			return db.Issue{}, "skipped", db.IntegrationSyncEvent{}, nil
+		}
 		issueNumber, err := qtx.IncrementIssueCounter(ctx, connection.WorkspaceID)
 		if err != nil {
 			return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("increment issue counter: %w", err)
@@ -1901,15 +1929,26 @@ func (h *Handler) pushIssueCommentOutbound(issue db.Issue, body string, actorUse
 	if provider == "" || sourceID == "" {
 		return
 	}
-	if provider == "zentao" {
-		// ZenTao's REST API (api.php/v1) exposes no comment endpoint — comments are
-		// an internal "action" it doesn't surface (Update Task accepts only
-		// status/consumed/left). Status sync works; comments can't be pushed, so
-		// skip rather than silently no-op.
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if provider == "zentao" {
+		// ZenTao 16.5 v1 REST has NO standalone "add comment" endpoint. Per the
+		// open-source server (github.com/easysoft/zentaopms): comments live in the
+		// ACTION table and are only written by action->create(), which v1 reaches
+		// solely through status-change entries (taskclose/taskfinish/… whose
+		// batchSetPost('comment') records the comment) — those mutate task status
+		// as a side effect, so they cannot carry a plain comment. The generic
+		// PUT /tasks/{id} entry setPosts only status/consumed/left (comment is
+		// dropped — previously confirmed as a no-op). There is therefore no way
+		// to deliver a comment without altering the task, so this is a hard
+		// FAILURE, recorded explicitly (status=error) rather than faked as OK.
+		h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID,
+			h.lookupActiveConnectionID(ctx, issue.WorkspaceID, "zentao"), issue.ProjectID,
+			"zentao", "comment", uuidToString(issue.ID), sourceID, "error",
+			"ZenTao comment outbound FAILED: ZenTao v1 REST has no comment endpoint; comment was NOT written to the task",
+			"unsupported: zentao v1 has no standalone comment endpoint")
+		return
+	}
 	const q = `
 SELECT c.base_url, c.config, a.credential_encrypted, b.external_ref
 FROM integration_connection c
@@ -1953,6 +1992,138 @@ ORDER BY a.account_key LIMIT 1`
 			slog.Warn("outbound comment sync failed", "provider", "feishu", "issue", uuidToString(issue.ID), "error", e)
 		}
 	}
+}
+
+// recordIntegrationOutboundEvent appends an outbound sync event from an async
+// (no *http.Request) context, so outbound attempts stay visible/auditable even
+// when skipped, unsupported, or failed.
+func (h *Handler) recordIntegrationOutboundEvent(ctx context.Context, workspaceID, connectionID, projectID pgtype.UUID, provider, objectType, objectID, externalID, status, message, errMsg string) {
+	if _, err := h.Queries.CreateIntegrationSyncEvent(ctx, db.CreateIntegrationSyncEventParams{
+		WorkspaceID:  workspaceID,
+		ConnectionID: connectionID,
+		Provider:     provider,
+		Direction:    "outbound",
+		ObjectType:   objectType,
+		ObjectID:     ptrToText(&objectID),
+		ExternalID:   ptrToText(&externalID),
+		ProjectID:    projectID,
+		Status:       status,
+		Message:      ptrToText(&message),
+		Error:        ptrToText(&errMsg),
+		Metadata:     []byte("{}"),
+	}); err != nil {
+		slog.Warn("integration outbound event write failed", "provider", provider, "status", status, "error", err)
+	}
+}
+
+// lookupActiveConnectionID returns the workspace's active connection id for a
+// provider (oldest first), or an invalid UUID if none. Best-effort, for event
+// attribution where the gate query didn't already resolve the connection.
+func (h *Handler) lookupActiveConnectionID(ctx context.Context, workspaceID pgtype.UUID, provider string) pgtype.UUID {
+	var id pgtype.UUID
+	_ = h.DB.QueryRow(ctx, `SELECT id FROM integration_connection WHERE workspace_id=$1 AND provider=$2 AND status='active' ORDER BY created_at LIMIT 1`, workspaceID, provider).Scan(&id)
+	return id
+}
+
+// handleMirrorIssueDeleted (run async after a mirror issue is deleted) ALWAYS
+// writes a tombstone — ungated — so the next inbound poll does not resurrect the
+// deleted mirror. It then best-effort cancels/closes the external item, gated by
+// the same hybrid outbound gate (binding + per-user) as status/comment sync.
+// Native (non-mirror) issues are ignored.
+func (h *Handler) handleMirrorIssueDeleted(issue db.Issue, actorUserID pgtype.UUID) {
+	defer func() { _ = recover() }()
+	meta := parseIssueMetadata(issue.Metadata)
+	provider := metadataString(meta, "source_system")
+	sourceID := metadataString(meta, "source_id")
+	if provider == "" || sourceID == "" {
+		return // not a mirror → nothing to suppress or cancel
+	}
+	sourceURL := metadataString(meta, "source_url")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 1) Tombstone — UNCONDITIONAL. Independent of outbound gates so a deleted
+	//    mirror never reappears, even when the workspace never enabled outbound.
+	if _, err := h.DB.Exec(ctx, `
+INSERT INTO integration_issue_tombstone (workspace_id, provider, source_id, project_id, source_url, issue_id, deleted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (workspace_id, provider, source_id) DO UPDATE
+  SET project_id = EXCLUDED.project_id, source_url = EXCLUDED.source_url,
+      issue_id = EXCLUDED.issue_id, deleted_by = EXCLUDED.deleted_by, created_at = now()`,
+		issue.WorkspaceID, provider, sourceID, issue.ProjectID, ptrToText(&sourceURL), issue.ID, actorUserID); err != nil {
+		slog.Warn("delete tombstone write failed", "provider", provider, "issue", uuidToString(issue.ID), "error", err)
+	}
+
+	// 2) Outbound cancel/close — gated exactly like status/comment sync. The
+	//    tombstone above is already durable regardless of what follows.
+	if h.IntegrationSecrets == nil {
+		return
+	}
+	if !actorUserID.Valid {
+		// The external cancel uses the actor's own per-user credential; with no
+		// valid actor (agent/system/internal delete, or a non-UUID token) we
+		// can't gate it to a user, so skip the external mutation and leave an
+		// audit trail. The tombstone is already written.
+		h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID,
+			h.lookupActiveConnectionID(ctx, issue.WorkspaceID, provider), issue.ProjectID,
+			provider, "issue", uuidToString(issue.ID), sourceID, "skipped",
+			"Mirror tombstoned; external cancel skipped (no valid actor for per-user credential)", "")
+		return
+	}
+	const q = `
+SELECT c.id, c.base_url, c.config, a.credential_encrypted, b.external_ref
+FROM integration_connection c
+JOIN integration_project_binding b
+  ON b.connection_id = c.id AND b.project_id = $3 AND b.outbound_enabled_at IS NOT NULL
+JOIN integration_issue_sync_setting s
+  ON s.workspace_id = c.workspace_id AND s.provider = c.provider AND s.user_id = $2 AND s.outbound_enabled_at IS NOT NULL
+JOIN integration_user_account a
+  ON a.connection_id = c.id AND a.user_id = $2 AND a.credential_encrypted IS NOT NULL
+WHERE c.workspace_id = $1 AND c.provider = $4 AND c.status = 'active' AND c.sync_enabled_at IS NOT NULL
+ORDER BY a.account_key LIMIT 1`
+	var connID pgtype.UUID
+	var baseURL pgtype.Text
+	var config, credEnc, externalRef []byte
+	if err := h.DB.QueryRow(ctx, q, issue.WorkspaceID, actorUserID, issue.ProjectID, provider).Scan(&connID, &baseURL, &config, &credEnc, &externalRef); err != nil {
+		return // outbound gate off / no credential — tombstone already written
+	}
+	base := ""
+	if baseURL.Valid {
+		base = baseURL.String
+	}
+	cred, err := h.IntegrationSecrets.Open(credEnc)
+	if err != nil {
+		return
+	}
+	var actErr error
+	switch provider {
+	case "gitlab":
+		ref := gitlabProjectRefFromExternalRef(externalRef)
+		iid, perr := strconv.ParseInt(sourceID, 10, 64)
+		if ref == "" || perr != nil {
+			return
+		}
+		actErr = gitlab.New(base, string(cred), nil).UpdateIssueState(ctx, ref, iid, "close")
+	case "zentao":
+		// No verified hard-delete via REST; cancel is the safe, reversible
+		// equivalent and the tombstone already prevents resurrection.
+		zc := zentaoParseCredential(cred)
+		actErr = zentao.New(base, zc.Token, nil).UpdateTaskStatus(ctx, sourceID, "cancel")
+	case "feishu":
+		at, te := h.feishuUserAccessToken(ctx, issue.WorkspaceID, actorUserID, config)
+		if te != nil {
+			return
+		}
+		actErr = feishu.New(base, "", "", nil).CompleteTask(ctx, at, sourceID, true)
+	default:
+		return
+	}
+	if actErr != nil {
+		slog.Warn("outbound delete sync failed", "provider", provider, "issue", uuidToString(issue.ID), "error", actErr)
+		h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID, provider, "issue", uuidToString(issue.ID), sourceID, "error", "Outbound cancel on delete failed", actErr.Error())
+		return
+	}
+	h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID, provider, "issue", uuidToString(issue.ID), sourceID, "success", "Mirror deleted; external item cancelled/closed", "")
 }
 
 // FetchProjectResourceContent returns real content from a project resource so an
@@ -2297,14 +2468,19 @@ func (h *Handler) syncZentaoExecutionBinding(ctx context.Context, project db.Pro
 	}
 
 	if _, err := h.Queries.UpsertIntegrationProjectBinding(ctx, db.UpsertIntegrationProjectBindingParams{
-		WorkspaceID:          project.WorkspaceID,
-		ProjectID:            project.ID,
-		ConnectionID:         conn.ID,
-		ExternalRef:          externalRef,
-		CreatedByUserID:      creator,
-		InboundEnabled:       enabling,
-		OutboundEnabled:      outbound,
-		IssueSyncEnabled:     issueSync,
+		WorkspaceID:     project.WorkspaceID,
+		ProjectID:       project.ID,
+		ConnectionID:    conn.ID,
+		ExternalRef:     externalRef,
+		CreatedByUserID: creator,
+		InboundEnabled:  enabling,
+		// Execution bindings are bidirectional issue-sync targets: when the
+		// execution resource is in use (enabling), default outbound + issue_sync
+		// ON so the binding isn't stuck inbound-only. Outbound delivery is still
+		// gated per-user; tear-down (disabling) only clears inbound, preserving
+		// whatever outbound/issue_sync was already set.
+		OutboundEnabled:      outbound || enabling,
+		IssueSyncEnabled:     issueSync || enabling,
 		KnowledgeSyncEnabled: knowledge,
 	}); err != nil {
 		slog.Warn("zentao auto-binding: upsert failed", "workspace_id", uuidToString(project.WorkspaceID), "connection_id", uuidToString(conn.ID), "error", err)

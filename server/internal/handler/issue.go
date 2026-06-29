@@ -2783,6 +2783,13 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 
 	h.deleteS3Objects(r.Context(), attachmentURLs)
 	userID := requestUserID(r)
+	// Mirrored external issue: ALWAYS tombstone it (so inbound won't resurrect),
+	// independent of actor validity. changer is zero/invalid when the actor is
+	// not a UUID member (agent/system/internal token); the tombstone still gets
+	// written (deleted_by NULL) and only the per-user external cancel is skipped
+	// inside the helper. No-op for native issues.
+	changer, _ := parseUUIDLoose(userID)
+	go h.handleMirrorIssueDeleted(issue, changer)
 	actorType, actorID := h.resolveActor(r, userID, uuidToString(issue.WorkspaceID))
 	// Always emit the resolved UUID — frontend caches key by UUID, so an
 	// identifier-style payload ("MUL-123") would leave stale entries on
@@ -3135,6 +3142,12 @@ func (h *Handler) BatchDeleteIssues(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.deleteS3Objects(r.Context(), attachmentURLs)
+
+		// Mirrored external issue: ALWAYS tombstone (so inbound won't resurrect),
+		// independent of actor validity; the per-user external cancel is gated
+		// inside the helper. changer is zero/invalid for non-UUID actors.
+		changer, _ := parseUUIDLoose(userID)
+		go h.handleMirrorIssueDeleted(issue, changer)
 
 		// Always emit the resolved UUID — frontend caches key by UUID.
 		actorType, actorID := h.resolveActor(r, userID, workspaceID)
