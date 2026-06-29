@@ -39,12 +39,26 @@ func New(baseURL, token string, hc *http.Client) *Client {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, int, error) {
+	return c.doURL(ctx, method, c.BaseURL+path, body)
+}
+
+// baseV2 returns the api.php/v2 root derived from the v1 BaseURL. ZenTao 21.7.8
+// applies task action transitions (start/finish/close) only on /api.php/v2; the
+// v1 action routes return 2xx without changing task.status. The zentao CLI also
+// talks to /api.php/v2.
+func (c *Client) baseV2() string {
+	return strings.TrimSuffix(c.BaseURL, "/api.php/v1") + "/api.php/v2"
+}
+
+// doURL issues a request against an absolute URL (used so action transitions can
+// target the v2 root while the rest of the client stays on v1).
+func (c *Client) doURL(ctx context.Context, method, url string, body any) ([]byte, int, error) {
 	var rdr io.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -269,29 +283,40 @@ func zentaoCancelPayload(t map[string]any) map[string]any {
 	}
 }
 
-// UpdateTaskStatus moves a task to the target ZenTao status. Normal transitions
-// use the real action endpoints (PUT /tasks/{id}/{action}: start/finish/close),
-// which apply ZenTao's per-action field rules and where the generic task PUT is
-// unreliable (it revalidates the whole form and silently keeps the old status or
-// 400s on effort fields). cancel has no action endpoint in ZenTao 21.7.8, so it
-// falls back to the generic full-form PUT with status=cancel (the verified delete
-// path). We GET the task first to satisfy per-action requirements (left for
-// start, consumed for finish) and to no-op when already in the target status.
-// Used by controlled outbound sync. Returns applied=false with a nil error when
-// the task is already in the target status or the target has no supported path
-// (wait, pause) — callers can record a "skipped" event for that case versus a
-// "success" when applied=true.
-func (c *Client) UpdateTaskStatus(ctx context.Context, taskID, status string) (applied bool, err error) {
+// getTask fetches a task's fields as a generic map from the v1 task endpoint.
+func (c *Client) getTask(ctx context.Context, taskID string) (map[string]any, error) {
 	raw, code, err := c.do(ctx, http.MethodGet, "/tasks/"+taskID, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if code < 200 || code >= 300 {
-		return false, fmt.Errorf("zentao: get task HTTP %d: %s", code, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("zentao: get task HTTP %d: %s", code, strings.TrimSpace(string(raw)))
 	}
 	var t map[string]any
 	if err := json.Unmarshal(raw, &t); err != nil {
-		return false, fmt.Errorf("zentao: decode task: %w", err)
+		return nil, fmt.Errorf("zentao: decode task: %w", err)
+	}
+	return t, nil
+}
+
+// UpdateTaskStatus moves a task to the target ZenTao status. Normal transitions
+// use the real action endpoints on the v2 root (PUT /api.php/v2/tasks/{id}/{action}:
+// start/finish/close), which apply ZenTao's per-action field rules. The v1 action
+// routes return 2xx without changing task.status (a false success), so action
+// transitions MUST go through v2. cancel has no action endpoint in ZenTao 21.7.8,
+// so it falls back to the generic full-form PUT /tasks/{id} with status=cancel
+// (the verified delete path, which works on v1). We GET the task first to satisfy
+// per-action requirements (left for start, consumed for finish) and to no-op when
+// already in the target status. After the write we GET again and verify the
+// source-side task.status equals the requested target; if not, we return an error
+// rather than report a false success. Used by controlled outbound sync. Returns
+// applied=false with a nil error when the task is already in the target status or
+// the target has no supported path (wait, pause) — callers can record a "skipped"
+// event for that case versus a "success" when applied=true.
+func (c *Client) UpdateTaskStatus(ctx context.Context, taskID, status string) (applied bool, err error) {
+	t, err := c.getTask(ctx, taskID)
+	if err != nil {
+		return false, err
 	}
 	if cur, _ := t["status"].(string); cur == status {
 		return false, nil // already in the target status (idempotent skip)
@@ -300,17 +325,30 @@ func (c *Client) UpdateTaskStatus(ctx context.Context, taskID, status string) (a
 	if action == "" {
 		return false, nil // no supported path for this target (wait, pause) — skip
 	}
-	// cancel has no action endpoint; PUT the generic full-form edit instead.
-	path := "/tasks/" + taskID + "/" + action
+	var raw2 []byte
+	var code2 int
 	if action == zentaoEditStatus {
-		path = "/tasks/" + taskID
+		// cancel has no action endpoint; PUT the generic full-form edit on v1.
+		raw2, code2, err = c.do(ctx, http.MethodPut, "/tasks/"+taskID, payload)
+	} else {
+		// start/finish/close apply only on the v2 action endpoint.
+		raw2, code2, err = c.doURL(ctx, http.MethodPut, c.baseV2()+"/tasks/"+taskID+"/"+action, payload)
 	}
-	raw2, code2, err := c.do(ctx, http.MethodPut, path, payload)
 	if err != nil {
 		return false, err
 	}
 	if code2 < 200 || code2 >= 300 {
 		return false, fmt.Errorf("zentao: task %s HTTP %d: %s", action, code2, strings.TrimSpace(string(raw2)))
+	}
+	// A 2xx from the action/PUT does not guarantee the transition applied (the v1
+	// action route was the source of false successes). Verify the source-side
+	// status actually reached the target before reporting success.
+	after, err := c.getTask(ctx, taskID)
+	if err != nil {
+		return false, err
+	}
+	if cur, _ := after["status"].(string); cur != status {
+		return false, fmt.Errorf("zentao: task %s status did not change to %q (still %q) after %s", taskID, status, cur, action)
 	}
 	return true, nil
 }
