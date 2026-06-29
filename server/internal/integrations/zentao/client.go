@@ -107,10 +107,57 @@ func (c *Client) Login(ctx context.Context, account, password string) (string, e
 
 // Task is a listed ZenTao task used for inbound mirroring.
 type Task struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Desc   string `json:"desc"`
-	Status string `json:"status"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Desc     string `json:"desc"`
+	Status   string `json:"status"`
+	ParentID string `json:"parent_id,omitempty"`
+}
+
+func (t *Task) UnmarshalJSON(raw []byte) error {
+	var aux struct {
+		ID            any `json:"id"`
+		Name          any `json:"name"`
+		Desc          any `json:"desc"`
+		Status        any `json:"status"`
+		Parent        any `json:"parent"`
+		ParentID      any `json:"parentID"`
+		ParentIDSnake any `json:"parent_id"`
+	}
+	if err := json.Unmarshal(raw, &aux); err != nil {
+		return err
+	}
+	t.ID = taskFieldString(aux.ID)
+	t.Name = taskFieldString(aux.Name)
+	t.Desc = taskFieldString(aux.Desc)
+	t.Status = taskFieldString(aux.Status)
+	t.ParentID = firstTaskID(taskFieldString(aux.Parent), taskFieldString(aux.ParentID), taskFieldString(aux.ParentIDSnake))
+	return nil
+}
+
+func firstTaskID(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v != "" && v != "0" {
+			return v
+		}
+	}
+	return ""
+}
+
+func taskFieldString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case json.Number:
+		return strings.TrimSpace(x.String())
+	}
+	return ""
 }
 
 // ListTasks lists tasks in an execution for inbound polling.

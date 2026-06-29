@@ -163,6 +163,7 @@ type SyncInboundIntegrationIssueRequest struct {
 	Description    *string `json:"description"`
 	SourceType     *string `json:"source_type"`
 	SourceID       string  `json:"source_id"`
+	SourceScope    *string `json:"source_scope"`
 	SourceURL      *string `json:"source_url"`
 	ExternalStatus *string `json:"external_status"`
 	ProjectID      *string `json:"project_id"`
@@ -589,9 +590,9 @@ func (h *Handler) UpsertIntegrationProjectBinding(w http.ResponseWriter, r *http
 		ConnectionID:         connUUID,
 		ExternalRef:          externalRef,
 		CreatedByUserID:      userUUID,
-		InboundEnabled:       req.InboundEnabled,
-		OutboundEnabled:      req.OutboundEnabled,
-		IssueSyncEnabled:     req.IssueSyncEnabled,
+		InboundEnabled:       true,
+		OutboundEnabled:      true,
+		IssueSyncEnabled:     true,
 		KnowledgeSyncEnabled: req.KnowledgeSyncEnabled,
 	})
 	if err != nil {
@@ -701,6 +702,7 @@ func (h *Handler) SyncInboundIntegrationIssue(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "source_id is required")
 		return
 	}
+	sourceScope := strings.TrimSpace(firstNonEmptyStringPtr(req.SourceScope))
 	sourceType := strings.ToLower(strings.TrimSpace(firstNonEmptyStringPtr(req.SourceType, "issue")))
 	sourceURL := strings.TrimSpace(firstNonEmptyStringPtr(req.SourceURL))
 	if sourceURL != "" && !isValidHTTPURL(sourceURL) {
@@ -724,9 +726,9 @@ func (h *Handler) SyncInboundIntegrationIssue(w http.ResponseWriter, r *http.Req
 
 	// A user-initiated inbound (re-)sync is an explicit "I want this item" action
 	// — clear any prior deletion tombstone so the mirror can be recreated.
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_id=$3`, wsUUID, connection.Provider, sourceID)
+	_, _ = h.DB.Exec(r.Context(), `DELETE FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_scope=$3 AND source_id=$4`, wsUUID, connection.Provider, sourceScope, sourceID)
 
-	issue, status, event, err := h.upsertInboundIntegrationIssue(r.Context(), connection, userUUID, assigneeID, projectID, resourceID, title, req.Description, sourceType, sourceID, sourceURL, externalStatus)
+	issue, status, event, err := h.upsertInboundIntegrationIssue(r.Context(), connection, userUUID, assigneeID, projectID, resourceID, title, req.Description, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "external issue is already being synced")
@@ -820,6 +822,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	description *string,
 	sourceType string,
 	sourceID string,
+	sourceScope string,
 	sourceURL string,
 	externalStatus string,
 ) (db.Issue, string, db.IntegrationSyncEvent, error) {
@@ -830,11 +833,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	defer tx.Rollback(ctx)
 	qtx := h.Queries.WithTx(tx)
 
-	existing, err := qtx.GetIssueByExternalSource(ctx, db.GetIssueByExternalSourceParams{
-		WorkspaceID:  connection.WorkspaceID,
-		SourceSystem: connection.Provider,
-		SourceID:     sourceID,
-	})
+	existing, err := h.lookupIssueByExternalSourceTx(ctx, tx, qtx, connection.WorkspaceID, connection.Provider, sourceID, sourceScope)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("get issue by external source: %w", err)
 	}
@@ -843,7 +842,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	status := "created"
 	var issue db.Issue
 	var eventMessage string
-	metadata, err := buildInboundIssueMetadata(existing.Metadata, connection, resourceID, sourceType, sourceID, sourceURL, externalStatus, title, description)
+	metadata, err := buildInboundIssueMetadata(existing.Metadata, connection, resourceID, sourceType, sourceID, sourceScope, sourceURL, externalStatus, title, description)
 	if err != nil {
 		return db.Issue{}, "", db.IntegrationSyncEvent{}, err
 	}
@@ -856,8 +855,8 @@ func (h *Handler) upsertInboundIntegrationIssue(
 		// rollback. Manual re-sync clears the tombstone first, so this only blocks
 		// automatic recreation.
 		var tombstoned bool
-		if e := h.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_id=$3)`,
-			connection.WorkspaceID, connection.Provider, sourceID).Scan(&tombstoned); e == nil && tombstoned {
+		if e := h.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_scope=$3 AND source_id=$4)`,
+			connection.WorkspaceID, connection.Provider, sourceScope, sourceID).Scan(&tombstoned); e == nil && tombstoned {
 			msg := "Inbound suppressed: mirror was deleted by a user (tombstoned)"
 			_, _ = h.Queries.CreateIntegrationSyncEvent(ctx, db.CreateIntegrationSyncEventParams{
 				WorkspaceID:  connection.WorkspaceID,
@@ -929,8 +928,9 @@ func (h *Handler) upsertInboundIntegrationIssue(
 
 	issueID := uuidToString(issue.ID)
 	eventMetadata, _ := json.Marshal(map[string]any{
-		"source_type": sourceType,
-		"sync_hash":   metadataString(parseIssueMetadata(metadata), "sync_hash"),
+		"source_type":  sourceType,
+		"source_scope": sourceScope,
+		"sync_hash":    metadataString(parseIssueMetadata(metadata), "sync_hash"),
 	})
 	event, err := qtx.CreateIntegrationSyncEvent(ctx, db.CreateIntegrationSyncEventParams{
 		WorkspaceID:  connection.WorkspaceID,
@@ -955,12 +955,92 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	return issue, status, event, nil
 }
 
+func (h *Handler) lookupIssueByExternalSourceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	qtx *db.Queries,
+	workspaceID pgtype.UUID,
+	provider string,
+	sourceID string,
+	sourceScope string,
+) (db.Issue, error) {
+	sourceScope = strings.TrimSpace(sourceScope)
+	if sourceScope == "" {
+		return qtx.GetIssueByExternalSource(ctx, db.GetIssueByExternalSourceParams{
+			WorkspaceID: workspaceID, SourceSystem: provider, SourceID: sourceID,
+		})
+	}
+	var issueID pgtype.UUID
+	err := tx.QueryRow(ctx, `
+SELECT id FROM issue
+WHERE workspace_id=$1
+  AND metadata @> jsonb_build_object('source_system', $2::text, 'source_id', $3::text, 'source_scope', $4::text)
+LIMIT 1`, workspaceID, provider, sourceID, sourceScope).Scan(&issueID)
+	if err == nil {
+		return qtx.GetIssue(ctx, issueID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.Issue{}, err
+	}
+
+	// Legacy compatibility: a mirror created before source_scope existed can be
+	// adopted by the first scoped sync for the same provider/source_id.
+	err = tx.QueryRow(ctx, `
+SELECT id FROM issue
+WHERE workspace_id=$1
+  AND metadata @> jsonb_build_object('source_system', $2::text, 'source_id', $3::text)
+  AND COALESCE(metadata->>'source_scope', '') = ''
+LIMIT 1`, workspaceID, provider, sourceID).Scan(&issueID)
+	if err == nil {
+		return qtx.GetIssue(ctx, issueID)
+	}
+	return db.Issue{}, err
+}
+
+func (h *Handler) lookupIssueByExternalSource(
+	ctx context.Context,
+	workspaceID pgtype.UUID,
+	provider string,
+	sourceID string,
+	sourceScope string,
+) (db.Issue, error) {
+	sourceScope = strings.TrimSpace(sourceScope)
+	if sourceScope == "" {
+		return h.Queries.GetIssueByExternalSource(ctx, db.GetIssueByExternalSourceParams{
+			WorkspaceID: workspaceID, SourceSystem: provider, SourceID: sourceID,
+		})
+	}
+	var issueID pgtype.UUID
+	err := h.DB.QueryRow(ctx, `
+SELECT id FROM issue
+WHERE workspace_id=$1
+  AND metadata @> jsonb_build_object('source_system', $2::text, 'source_id', $3::text, 'source_scope', $4::text)
+LIMIT 1`, workspaceID, provider, sourceID, sourceScope).Scan(&issueID)
+	if err == nil {
+		return h.Queries.GetIssue(ctx, issueID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.Issue{}, err
+	}
+	err = h.DB.QueryRow(ctx, `
+SELECT id FROM issue
+WHERE workspace_id=$1
+  AND metadata @> jsonb_build_object('source_system', $2::text, 'source_id', $3::text)
+  AND COALESCE(metadata->>'source_scope', '') = ''
+LIMIT 1`, workspaceID, provider, sourceID).Scan(&issueID)
+	if err == nil {
+		return h.Queries.GetIssue(ctx, issueID)
+	}
+	return db.Issue{}, err
+}
+
 func buildInboundIssueMetadata(
 	existingRaw []byte,
 	connection db.IntegrationConnection,
 	resourceID pgtype.UUID,
 	sourceType string,
 	sourceID string,
+	sourceScope string,
 	sourceURL string,
 	externalStatus string,
 	title string,
@@ -970,6 +1050,11 @@ func buildInboundIssueMetadata(
 	metadata["source_system"] = connection.Provider
 	metadata["source_type"] = sourceType
 	metadata["source_id"] = sourceID
+	if strings.TrimSpace(sourceScope) != "" {
+		metadata["source_scope"] = strings.TrimSpace(sourceScope)
+	} else {
+		delete(metadata, "source_scope")
+	}
 	metadata["source_connection_id"] = uuidToString(connection.ID)
 	if resourceID.Valid {
 		metadata["source_resource_id"] = uuidToString(resourceID)
@@ -980,7 +1065,7 @@ func buildInboundIssueMetadata(
 	if externalStatus != "" {
 		metadata["external_status"] = externalStatus
 	}
-	metadata["sync_hash"] = integrationIssueSyncHash(title, description, sourceType, sourceID, sourceURL, externalStatus)
+	metadata["sync_hash"] = integrationIssueSyncHash(title, description, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
 	metadata["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
 	if len(metadata) > maxIssueMetadataKeys {
 		return nil, errors.New("metadata cannot exceed 50 keys")
@@ -988,7 +1073,7 @@ func buildInboundIssueMetadata(
 	return json.Marshal(metadata)
 }
 
-func integrationIssueSyncHash(title string, description *string, sourceType string, sourceID string, sourceURL string, externalStatus string) string {
+func integrationIssueSyncHash(title string, description *string, sourceType string, sourceID string, sourceScope string, sourceURL string, externalStatus string) string {
 	descriptionValue := ""
 	if description != nil {
 		descriptionValue = strings.TrimSpace(*description)
@@ -998,6 +1083,7 @@ func integrationIssueSyncHash(title string, description *string, sourceType stri
 		"description":     descriptionValue,
 		"source_type":     sourceType,
 		"source_id":       sourceID,
+		"source_scope":    strings.TrimSpace(sourceScope),
 		"source_url":      sourceURL,
 		"external_status": externalStatus,
 	})
@@ -1517,6 +1603,7 @@ func (h *Handler) ListInboundSyncTargets(ctx context.Context) ([]InboundSyncTarg
 	// execution but predate the create/update auto-binding still have no inbound
 	// binding, so they'd be invisible to the query below until re-saved. Reconcile
 	// them here (best-effort) so they're picked up without user action.
+	h.reconcileGitLabRepoBindings(ctx)
 	h.reconcileZentaoExecutionBindings(ctx)
 
 	const q = `
@@ -1576,15 +1663,18 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		assignee = actor
 	}
 	count = 0
-	upsert := func(title string, desc *string, sourceType, sourceID, sourceURL, externalStatus string) {
+	upsert := func(title string, desc *string, sourceType, sourceID, sourceScope, sourceURL, externalStatus string) (db.Issue, string) {
 		if sourceID == "" {
-			return
+			return db.Issue{}, ""
 		}
-		if _, _, _, e := h.upsertInboundIntegrationIssue(ctx, conn, actor, assignee, t.ProjectID, pgtype.UUID{}, title, desc, sourceType, sourceID, sourceURL, externalStatus); e == nil {
+		issue, status, _, e := h.upsertInboundIntegrationIssue(ctx, conn, actor, assignee, t.ProjectID, pgtype.UUID{}, title, desc, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
+		if e == nil {
 			count++
+			return issue, status
 		} else {
 			slog.Warn("inbound sync: upsert failed", "provider", t.Provider, "source_id", sourceID, "error", e)
 		}
+		return db.Issue{}, ""
 	}
 
 	switch t.Provider {
@@ -1593,13 +1683,14 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		if ref == "" {
 			return 0, nil
 		}
+		sourceScope := integrationSourceScope(t.ConnectionID, ref)
 		issues, err := gitlab.New(baseURL, string(cred), nil).ListIssues(ctx, ref, "all", "", 50)
 		if err != nil {
 			return 0, err
 		}
 		for _, is := range issues {
 			desc := is.Description
-			upsert(is.Title, &desc, "issue", strconv.FormatInt(is.IID, 10), is.WebURL, is.State)
+			upsert(is.Title, &desc, "issue", strconv.FormatInt(is.IID, 10), sourceScope, is.WebURL, is.State)
 		}
 	case "zentao":
 		exec := zentaoProjectIDFromRef(t.ExternalRef)
@@ -1619,11 +1710,20 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		if err != nil {
 			return 0, err
 		}
+		taskIssues := make(map[string]db.Issue, len(tasks))
+		taskParents := make(map[string]string, len(tasks))
 		for _, tk := range tasks {
 			desc := tk.Desc
 			url := strings.TrimRight(baseURL, "/") + "/task-view-" + tk.ID + ".html"
-			upsert(tk.Name, &desc, "task", tk.ID, url, tk.Status)
+			issue, status := upsert(tk.Name, &desc, "task", tk.ID, "", url, tk.Status)
+			if issue.ID.Valid && status != "skipped" {
+				taskIssues[tk.ID] = issue
+				if tk.ParentID != "" {
+					taskParents[tk.ID] = tk.ParentID
+				}
+			}
 		}
+		h.linkZentaoTaskParents(ctx, conn, taskIssues, taskParents)
 	case "feishu":
 		// Personal Feishu tasks are only visible to a user_access_token. Only the
 		// OAuth account holds the user's refresh token (the other feishu account
@@ -1681,10 +1781,53 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 			return 0, err
 		}
 		for _, tk := range tasks {
-			upsert(tk.Summary, nil, "feishu_task", tk.GUID, tk.URL, "todo")
+			upsert(tk.Summary, nil, "feishu_task", tk.GUID, "", tk.URL, "todo")
 		}
 	}
 	return count, nil
+}
+
+func integrationSourceScope(connectionID pgtype.UUID, externalProjectRef string) string {
+	externalProjectRef = strings.TrimSpace(externalProjectRef)
+	if !connectionID.Valid || externalProjectRef == "" {
+		return ""
+	}
+	return uuidToString(connectionID) + ":" + strings.ToLower(externalProjectRef)
+}
+
+func (h *Handler) linkZentaoTaskParents(ctx context.Context, conn db.IntegrationConnection, taskIssues map[string]db.Issue, taskParents map[string]string) {
+	for childSourceID, parentSourceID := range taskParents {
+		childSourceID = strings.TrimSpace(childSourceID)
+		parentSourceID = strings.TrimSpace(parentSourceID)
+		if childSourceID == "" || parentSourceID == "" || parentSourceID == "0" || parentSourceID == childSourceID {
+			continue
+		}
+		child, ok := taskIssues[childSourceID]
+		if !ok || !child.ID.Valid {
+			continue
+		}
+		parent, ok := taskIssues[parentSourceID]
+		if !ok {
+			var err error
+			parent, err = h.lookupIssueByExternalSource(ctx, conn.WorkspaceID, conn.Provider, parentSourceID, "")
+			if err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Warn("zentao inbound: parent lookup failed", "source_id", parentSourceID, "error", err)
+				}
+				continue
+			}
+		}
+		if !parent.ID.Valid || uuidToString(parent.ID) == uuidToString(child.ID) {
+			continue
+		}
+		if _, err := h.DB.Exec(ctx, `
+UPDATE issue
+SET parent_issue_id=$1, updated_at=now()
+WHERE workspace_id=$2 AND id=$3 AND parent_issue_id IS DISTINCT FROM $1`,
+			parent.ID, conn.WorkspaceID, child.ID); err != nil {
+			slog.Warn("zentao inbound: parent link failed", "child_source_id", childSourceID, "parent_source_id", parentSourceID, "error", err)
+		}
+	}
 }
 
 // isIntegrationAuthError reports whether a sync error is a credential/auth
@@ -2078,6 +2221,7 @@ func (h *Handler) handleMirrorIssueDeleted(issue db.Issue, actorUserID pgtype.UU
 	if provider == "" || sourceID == "" {
 		return // not a mirror → nothing to suppress or cancel
 	}
+	sourceScope := metadataString(meta, "source_scope")
 	sourceURL := metadataString(meta, "source_url")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -2085,12 +2229,12 @@ func (h *Handler) handleMirrorIssueDeleted(issue db.Issue, actorUserID pgtype.UU
 	// 1) Tombstone — UNCONDITIONAL. Independent of outbound gates so a deleted
 	//    mirror never reappears, even when the workspace never enabled outbound.
 	if _, err := h.DB.Exec(ctx, `
-INSERT INTO integration_issue_tombstone (workspace_id, provider, source_id, project_id, source_url, issue_id, deleted_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (workspace_id, provider, source_id) DO UPDATE
+INSERT INTO integration_issue_tombstone (workspace_id, provider, source_scope, source_id, project_id, source_url, issue_id, deleted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (workspace_id, provider, source_scope, source_id) DO UPDATE
   SET project_id = EXCLUDED.project_id, source_url = EXCLUDED.source_url,
       issue_id = EXCLUDED.issue_id, deleted_by = EXCLUDED.deleted_by, created_at = now()`,
-		issue.WorkspaceID, provider, sourceID, issue.ProjectID, ptrToText(&sourceURL), issue.ID, actorUserID); err != nil {
+		issue.WorkspaceID, provider, sourceScope, sourceID, issue.ProjectID, ptrToText(&sourceURL), issue.ID, actorUserID); err != nil {
 		slog.Warn("delete tombstone write failed", "provider", provider, "issue", uuidToString(issue.ID), "error", err)
 	}
 
@@ -2465,6 +2609,211 @@ func zentaoProjectIDFromRef(raw []byte) string {
 	return zentaoTargetFromRef(raw).ID
 }
 
+type gitLabRepoBindingTarget struct {
+	conn db.IntegrationConnection
+	ref  string
+	url  string
+}
+
+func (h *Handler) syncGitLabRepoBinding(ctx context.Context, project db.Project, resourceType string, resourceRef, prevRef []byte, creator pgtype.UUID) {
+	target, enabling := h.gitLabRepoBindingTarget(ctx, project.WorkspaceID, resourceType, resourceRef)
+	prev, hadPrev := h.gitLabRepoBindingTarget(ctx, project.WorkspaceID, resourceType, prevRef)
+
+	bindings, berr := h.Queries.ListIntegrationProjectBindings(ctx, project.WorkspaceID)
+	if berr != nil {
+		slog.Warn("gitlab auto-binding: list bindings failed", "workspace_id", uuidToString(project.WorkspaceID), "error", berr)
+		return
+	}
+
+	if enabling {
+		for _, b := range bindings {
+			if uuidToString(b.ConnectionID) == uuidToString(target.conn.ID) &&
+				!sameUUID(b.ProjectID, project.ID) &&
+				strings.EqualFold(gitlabProjectRefFromExternalRef(b.ExternalRef), target.ref) {
+				return
+			}
+		}
+
+		outbound, issueSync, knowledge := true, true, false
+		for _, b := range bindings {
+			if sameUUID(b.ProjectID, project.ID) && sameUUID(b.ConnectionID, target.conn.ID) {
+				outbound = outbound || b.OutboundEnabledAt.Valid
+				issueSync = issueSync || b.IssueSyncEnabledAt.Valid
+				knowledge = b.KnowledgeSyncEnabledAt.Valid
+				break
+			}
+		}
+
+		externalRef, _ := json.Marshal(map[string]string{
+			"url":                 target.url,
+			"path_with_namespace": target.ref,
+		})
+		if _, err := h.Queries.UpsertIntegrationProjectBinding(ctx, db.UpsertIntegrationProjectBindingParams{
+			WorkspaceID:          project.WorkspaceID,
+			ProjectID:            project.ID,
+			ConnectionID:         target.conn.ID,
+			ExternalRef:          externalRef,
+			CreatedByUserID:      creator,
+			InboundEnabled:       true,
+			OutboundEnabled:      outbound,
+			IssueSyncEnabled:     issueSync,
+			KnowledgeSyncEnabled: knowledge,
+		}); err != nil {
+			slog.Warn("gitlab auto-binding: upsert failed", "workspace_id", uuidToString(project.WorkspaceID), "connection_id", uuidToString(target.conn.ID), "error", err)
+		}
+		return
+	}
+
+	if !hadPrev {
+		return
+	}
+	for _, b := range bindings {
+		if !sameUUID(b.ProjectID, project.ID) || !sameUUID(b.ConnectionID, prev.conn.ID) {
+			continue
+		}
+		if !strings.EqualFold(gitlabProjectRefFromExternalRef(b.ExternalRef), prev.ref) || !b.InboundEnabledAt.Valid {
+			return
+		}
+		if _, err := h.Queries.UpsertIntegrationProjectBinding(ctx, db.UpsertIntegrationProjectBindingParams{
+			WorkspaceID:          project.WorkspaceID,
+			ProjectID:            project.ID,
+			ConnectionID:         prev.conn.ID,
+			ExternalRef:          b.ExternalRef,
+			CreatedByUserID:      creator,
+			InboundEnabled:       false,
+			OutboundEnabled:      b.OutboundEnabledAt.Valid,
+			IssueSyncEnabled:     b.IssueSyncEnabledAt.Valid,
+			KnowledgeSyncEnabled: b.KnowledgeSyncEnabledAt.Valid,
+		}); err != nil {
+			slog.Warn("gitlab auto-binding: disable stale binding failed", "workspace_id", uuidToString(project.WorkspaceID), "connection_id", uuidToString(prev.conn.ID), "error", err)
+		}
+		return
+	}
+}
+
+func (h *Handler) gitLabRepoBindingTarget(ctx context.Context, workspaceID pgtype.UUID, resourceType string, resourceRef []byte) (gitLabRepoBindingTarget, bool) {
+	if len(resourceRef) == 0 || (resourceType != "gitlab_repo" && resourceType != "github_repo") {
+		return gitLabRepoBindingTarget{}, false
+	}
+	repoURL := gitRepoURLFromResource(resourceType, resourceRef)
+	repoHost := gitRepoHost(repoURL)
+	repoRef := gitProjectPathFromURL(repoURL)
+	if repoHost == "" || repoRef == "" {
+		return gitLabRepoBindingTarget{}, false
+	}
+
+	conns, err := h.Queries.ListIntegrationConnections(ctx, workspaceID)
+	if err != nil {
+		slog.Warn("gitlab auto-binding: list connections failed", "workspace_id", uuidToString(workspaceID), "error", err)
+		return gitLabRepoBindingTarget{}, false
+	}
+	var matches []db.IntegrationConnection
+	for _, c := range conns {
+		if c.Provider != "gitlab" || c.Status != "active" {
+			continue
+		}
+		if c.BaseUrl.Valid && strings.EqualFold(gitRepoHost(c.BaseUrl.String), repoHost) {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) != 1 {
+		return gitLabRepoBindingTarget{}, false
+	}
+	return gitLabRepoBindingTarget{conn: matches[0], ref: repoRef, url: repoURL}, true
+}
+
+func gitRepoURLFromResource(resourceType string, raw []byte) string {
+	switch resourceType {
+	case "gitlab_repo":
+		var ref gitLabRepoRef
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(ref.URL)
+	case "github_repo":
+		var ref githubRepoRef
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(ref.URL)
+	default:
+		return ""
+	}
+}
+
+func gitRepoHost(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Hostname())
+	}
+	if at := strings.LastIndex(rawURL, "@"); at >= 0 {
+		rest := rawURL[at+1:]
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			return strings.ToLower(strings.Trim(rest[:colon], "[]"))
+		}
+	}
+	return ""
+}
+
+func gitProjectPathFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		return strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")
+	}
+	if at := strings.LastIndex(rawURL, "@"); at >= 0 {
+		rest := rawURL[at+1:]
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			path := rest[colon+1:]
+			if cut := strings.IndexAny(path, "?#"); cut >= 0 {
+				path = path[:cut]
+			}
+			return strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+		}
+	}
+	return ""
+}
+
+func sameUUID(a, b pgtype.UUID) bool {
+	return a.Valid && b.Valid && uuidToString(a) == uuidToString(b)
+}
+
+// reconcileGitLabRepoBindings backfills GitLab project bindings for resources
+// that predate the create/update auto-binding. It processes resources in stable
+// creation order so the first project to reference a connection+repo owns it;
+// later duplicates are intentionally skipped by syncGitLabRepoBinding.
+func (h *Handler) reconcileGitLabRepoBindings(ctx context.Context) {
+	const q = `
+SELECT project_id, workspace_id, resource_type, resource_ref, created_by
+FROM project_resource
+WHERE resource_type IN ('gitlab_repo', 'github_repo')
+ORDER BY created_at ASC, id ASC`
+	rows, err := h.DB.Query(ctx, q)
+	if err != nil {
+		slog.Warn("gitlab reconcile: list resources failed", "error", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID, workspaceID, creator pgtype.UUID
+		var resourceType string
+		var ref []byte
+		if err := rows.Scan(&projectID, &workspaceID, &resourceType, &ref, &creator); err != nil {
+			slog.Warn("gitlab reconcile: scan failed", "error", err)
+			return
+		}
+		h.syncGitLabRepoBinding(ctx, db.Project{ID: projectID, WorkspaceID: workspaceID}, resourceType, ref, nil, creator)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("gitlab reconcile: iterate resources failed", "error", err)
+	}
+}
+
 // syncZentaoExecutionBinding mirrors a zentao_project resource that resolves to a
 // ZenTao execution into an inbound-enabled integration_project_binding, so the
 // scheduler's ListInboundSyncTargets picks it up automatically (a project
@@ -2642,9 +2991,7 @@ func gitlabProjectRefFromExternalRef(raw []byte) string {
 		}
 	}
 	if u, ok := ref["url"].(string); ok && strings.TrimSpace(u) != "" {
-		if parsed, perr := url.Parse(strings.TrimSpace(u)); perr == nil {
-			return strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")
-		}
+		return gitProjectPathFromURL(u)
 	}
 	return ""
 }

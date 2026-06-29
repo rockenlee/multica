@@ -1,11 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func TestOutboundIssueSyncInFlightStatus(t *testing.T) {
@@ -47,6 +51,224 @@ func TestOutboundIssueSyncInFlightStatus(t *testing.T) {
 				t.Fatalf("outboundIssueSyncInFlightStatus() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUpsertIntegrationProjectBindingForcesIssueSyncDefaults(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/workspaces/"+testWorkspaceID+"/integrations/connections", map[string]any{
+		"provider":     "gitlab",
+		"name":         "gitlab-project-binding-defaults",
+		"base_url":     "https://gitlab.example.com",
+		"sync_enabled": true,
+	})
+	req = withURLParam(req, "id", testWorkspaceID)
+	testHandler.CreateIntegrationConnection(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIntegrationConnection: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var connection IntegrationConnectionResponse
+	if err := json.NewDecoder(w.Body).Decode(&connection); err != nil {
+		t.Fatalf("decode connection: %v", err)
+	}
+	defer func() {
+		req := newRequest("DELETE", "/api/workspaces/"+testWorkspaceID+"/integrations/connections/"+connection.ID, nil)
+		req = withURLParams(req, "id", testWorkspaceID, "connectionId", connection.ID)
+		testHandler.DeleteIntegrationConnection(httptest.NewRecorder(), req)
+	}()
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/projects?workspace_id="+testWorkspaceID, map[string]any{
+		"title": "Project binding defaults",
+	})
+	testHandler.CreateProject(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateProject: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var project ProjectResponse
+	if err := json.NewDecoder(w.Body).Decode(&project); err != nil {
+		t.Fatalf("decode project: %v", err)
+	}
+	defer func() {
+		req := newRequest("DELETE", "/api/projects/"+project.ID, nil)
+		req = withURLParam(req, "id", project.ID)
+		testHandler.DeleteProject(httptest.NewRecorder(), req)
+	}()
+
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/workspaces/"+testWorkspaceID+"/integrations/connections/"+connection.ID+"/project-bindings/"+project.ID, map[string]any{
+		"external_ref": map[string]any{"path_with_namespace": "group/project"},
+		// These are intentionally false: project binding direction is not a
+		// user-facing control surface; account sync settings own that decision.
+		"inbound_enabled":        false,
+		"outbound_enabled":       false,
+		"issue_sync_enabled":     false,
+		"knowledge_sync_enabled": false,
+	})
+	req = withURLParams(req, "id", testWorkspaceID, "connectionId", connection.ID, "projectId", project.ID)
+	testHandler.UpsertIntegrationProjectBinding(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpsertIntegrationProjectBinding: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var binding IntegrationProjectBindingResponse
+	if err := json.NewDecoder(w.Body).Decode(&binding); err != nil {
+		t.Fatalf("decode binding: %v", err)
+	}
+	if !binding.InboundEnabled || !binding.OutboundEnabled || !binding.IssueSyncEnabled {
+		t.Fatalf("project binding sync defaults = inbound:%v outbound:%v issue:%v, want all true",
+			binding.InboundEnabled, binding.OutboundEnabled, binding.IssueSyncEnabled)
+	}
+	if binding.KnowledgeSyncEnabled {
+		t.Fatalf("knowledge sync should still follow the request body")
+	}
+}
+
+func TestGitLabResourceReconcileCreatesSingleBindingForDuplicateRepo(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	var connID, firstProjectID, secondProjectID string
+	if err := testPool.QueryRow(ctx, `
+INSERT INTO integration_connection (workspace_id, provider, name, base_url, status, sync_enabled_at)
+VALUES ($1, 'gitlab', 'gitlab-resource-reconcile', 'https://gitlab.dyvip.tech', 'active', now())
+RETURNING id`, testWorkspaceID).Scan(&connID); err != nil {
+		t.Fatalf("seed gitlab connection: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM integration_connection WHERE id=$1`, connID) })
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, 'gitlab first project') RETURNING id`, testWorkspaceID).Scan(&firstProjectID); err != nil {
+		t.Fatalf("seed first project: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, 'gitlab second project') RETURNING id`, testWorkspaceID).Scan(&secondProjectID); err != nil {
+		t.Fatalf("seed second project: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM project WHERE id IN ($1, $2)`, firstProjectID, secondProjectID)
+	})
+	resourceRef := []byte(`{"url":"https://gitlab.dyvip.tech/chengnengliang/route-match"}`)
+	if _, err := testPool.Exec(ctx, `
+INSERT INTO project_resource (project_id, workspace_id, resource_type, resource_ref, created_by, created_at)
+VALUES ($1, $3, 'github_repo', $4, $5, now() - interval '1 second'),
+       ($2, $3, 'github_repo', $4, $5, now())`,
+		firstProjectID, secondProjectID, testWorkspaceID, resourceRef, testUserID); err != nil {
+		t.Fatalf("seed project resources: %v", err)
+	}
+
+	testHandler.reconcileGitLabRepoBindings(ctx)
+
+	var count int
+	var projectID string
+	if err := testPool.QueryRow(ctx, `
+SELECT count(*), min(project_id::text)
+FROM integration_project_binding
+WHERE connection_id=$1
+  AND external_ref->>'path_with_namespace'='chengnengliang/route-match'
+  AND inbound_enabled_at IS NOT NULL
+  AND issue_sync_enabled_at IS NOT NULL`,
+		connID).Scan(&count, &projectID); err != nil {
+		t.Fatalf("count gitlab bindings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("gitlab binding count = %d, want 1", count)
+	}
+	if projectID != firstProjectID {
+		t.Fatalf("gitlab binding project = %s, want earliest %s", projectID, firstProjectID)
+	}
+}
+
+func TestGitLabInboundSourceScopeAvoidsIIDCollision(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	var connID, projectA, projectB string
+	if err := testPool.QueryRow(ctx, `
+INSERT INTO integration_connection (workspace_id, provider, name, base_url, status, sync_enabled_at)
+VALUES ($1, 'gitlab', 'gitlab-source-scope', 'https://gitlab.example.com', 'active', now())
+RETURNING id`, testWorkspaceID).Scan(&connID); err != nil {
+		t.Fatalf("seed gitlab connection: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM integration_connection WHERE id=$1`, connID) })
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, 'gitlab scope A') RETURNING id`, testWorkspaceID).Scan(&projectA); err != nil {
+		t.Fatalf("seed project A: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, 'gitlab scope B') RETURNING id`, testWorkspaceID).Scan(&projectB); err != nil {
+		t.Fatalf("seed project B: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM project WHERE id IN ($1, $2)`, projectA, projectB)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='gitlab' AND metadata->>'source_id'='1'`, testWorkspaceID)
+	})
+	conn, err := testHandler.Queries.GetIntegrationConnectionInWorkspace(ctx, db.GetIntegrationConnectionInWorkspaceParams{
+		ID:          parseUUID(connID),
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("load gitlab connection: %v", err)
+	}
+	descA, descB := "issue A", "issue B"
+	issueA, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectA), pgtype.UUID{},
+		"GitLab IID 1 A", &descA, "issue", "1", integrationSourceScope(conn.ID, "group/a"), "https://gitlab.example.com/group/a/-/issues/1", "opened")
+	if err != nil {
+		t.Fatalf("upsert issue A: %v", err)
+	}
+	issueB, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectB), pgtype.UUID{},
+		"GitLab IID 1 B", &descB, "issue", "1", integrationSourceScope(conn.ID, "group/b"), "https://gitlab.example.com/group/b/-/issues/1", "opened")
+	if err != nil {
+		t.Fatalf("upsert issue B: %v", err)
+	}
+	if uuidToString(issueA.ID) == uuidToString(issueB.ID) {
+		t.Fatalf("scoped GitLab imports reused the same issue id %s", uuidToString(issueA.ID))
+	}
+	if metadataString(parseIssueMetadata(issueA.Metadata), "source_scope") == "" || metadataString(parseIssueMetadata(issueB.Metadata), "source_scope") == "" {
+		t.Fatalf("expected source_scope metadata on both GitLab mirror issues")
+	}
+}
+
+func TestLinkZentaoTaskParents(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	conn := seedZentaoConnection(t, ctx, "zentao-parent-link")
+	var projectID string
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, 'zentao parent link') RETURNING id`, testWorkspaceID).Scan(&projectID); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM project WHERE id=$1`, projectID) })
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='zentao' AND metadata->>'source_id' IN ('ZT-PARENT-1', 'ZT-CHILD-1')`, testWorkspaceID)
+	})
+
+	parent, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectID), pgtype.UUID{},
+		"ZenTao parent", nil, "task", "ZT-PARENT-1", "", "https://zentao/task-parent", "doing")
+	if err != nil {
+		t.Fatalf("upsert parent: %v", err)
+	}
+	child, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectID), pgtype.UUID{},
+		"ZenTao child", nil, "task", "ZT-CHILD-1", "", "https://zentao/task-child", "doing")
+	if err != nil {
+		t.Fatalf("upsert child: %v", err)
+	}
+	testHandler.linkZentaoTaskParents(ctx, conn, map[string]db.Issue{
+		"ZT-PARENT-1": parent,
+		"ZT-CHILD-1":  child,
+	}, map[string]string{"ZT-CHILD-1": "ZT-PARENT-1"})
+
+	got, err := testHandler.Queries.GetIssue(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("reload child: %v", err)
+	}
+	if uuidToString(got.ParentIssueID) != uuidToString(parent.ID) {
+		t.Fatalf("child parent_issue_id = %s, want %s", uuidToString(got.ParentIssueID), uuidToString(parent.ID))
 	}
 }
 

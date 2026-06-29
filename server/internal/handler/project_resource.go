@@ -490,6 +490,9 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 	if resource.ResourceType == "zentao_project" {
 		h.syncZentaoExecutionBinding(r.Context(), project, resource.ResourceRef, nil, creator)
 	}
+	if resource.ResourceType == "gitlab_repo" || resource.ResourceType == "github_repo" {
+		h.syncGitLabRepoBinding(r.Context(), project, resource.ResourceType, resource.ResourceRef, nil, creator)
+	}
 
 	resp := projectResourceToResponse(resource)
 	h.publish(
@@ -608,6 +611,10 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 	if existing.ResourceType == "zentao_project" {
 		creator, _ := h.parseUserUUIDOrZero(userID)
 		h.syncZentaoExecutionBinding(r.Context(), project, updated.ResourceRef, existing.ResourceRef, creator)
+	}
+	if existing.ResourceType == "gitlab_repo" || existing.ResourceType == "github_repo" {
+		creator, _ := h.parseUserUUIDOrZero(userID)
+		h.syncGitLabRepoBinding(r.Context(), project, existing.ResourceType, updated.ResourceRef, existing.ResourceRef, creator)
 	}
 
 	resp := projectResourceToResponse(updated)
