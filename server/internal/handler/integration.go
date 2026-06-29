@@ -1779,9 +1779,9 @@ func (h *Handler) providerConnectionCredential(ctx context.Context, workspaceID,
 func zentaoStatusFor(status string) string {
 	switch status {
 	case "done":
-		// "closed" instead of "done" to bypass ZenTao's finish-requires-effort
-		// (consumed > 0) rule. User-chosen mapping.
-		return "closed"
+		// Real ZenTao "finish" action; the client supplies the required
+		// consumed effort so finish doesn't 400 on zero effort.
+		return "done"
 	case "cancelled":
 		return "cancel"
 	case "in_progress", "in_review":
@@ -1900,8 +1900,23 @@ ORDER BY a.account_key LIMIT 1`
 		}
 	case "zentao":
 		zc := zentaoParseCredential(cred)
-		if e := zentao.New(base, zc.Token, nil).UpdateTaskStatus(ctx, sourceID, zentaoStatusFor(status)); e != nil {
+		target := zentaoStatusFor(status)
+		applied, e := zentao.New(base, zc.Token, nil).UpdateTaskStatus(ctx, sourceID, target)
+		connID := h.lookupActiveConnectionID(ctx, issue.WorkspaceID, "zentao")
+		switch {
+		case e != nil:
 			slog.Warn("outbound status sync failed", "provider", "zentao", "issue", uuidToString(issue.ID), "error", e)
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"zentao", "issue", uuidToString(issue.ID), sourceID, "error",
+				"Status outbound to ZenTao failed (target "+target+")", e.Error())
+		case !applied:
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"zentao", "issue", uuidToString(issue.ID), sourceID, "skipped",
+				"Status outbound skipped (no ZenTao action for target "+target+", or already in target)", "")
+		default:
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"zentao", "issue", uuidToString(issue.ID), sourceID, "success",
+				"Status synced to ZenTao (target "+target+")", "")
 		}
 	case "feishu":
 		at, te := h.feishuUserAccessToken(ctx, issue.WorkspaceID, actorUserID, config)
@@ -2108,7 +2123,7 @@ ORDER BY a.account_key LIMIT 1`
 		// No verified hard-delete via REST; cancel is the safe, reversible
 		// equivalent and the tombstone already prevents resurrection.
 		zc := zentaoParseCredential(cred)
-		actErr = zentao.New(base, zc.Token, nil).UpdateTaskStatus(ctx, sourceID, "cancel")
+		_, actErr = zentao.New(base, zc.Token, nil).UpdateTaskStatus(ctx, sourceID, "cancel")
 	case "feishu":
 		at, te := h.feishuUserAccessToken(ctx, issue.WorkspaceID, actorUserID, config)
 		if te != nil {

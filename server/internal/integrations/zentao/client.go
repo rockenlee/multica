@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -160,36 +161,156 @@ func (c *Client) CreateTask(ctx context.Context, executionID, name, description,
 	return "", fmt.Sprintf("HTTP %d: %s", status, strings.TrimSpace(string(raw))), nil
 }
 
-// UpdateTaskStatus sets a task's status (wait/doing/done/pause/cancel/closed).
-// ZenTao's task PUT is a full-form edit that revalidates required fields, so we
-// GET the task first and resend name/execution/type/consumed with the new
-// status. Used by controlled outbound sync when a mirrored issue's status
-// changes in Multica.
-func (c *Client) UpdateTaskStatus(ctx context.Context, taskID, status string) error {
-	raw, code, err := c.do(ctx, http.MethodGet, "/tasks/"+taskID, nil)
-	if err != nil {
-		return err
+// taskNum extracts a numeric task field that ZenTao may return either as a JSON
+// number or a string ("0.00", "8").
+func taskNum(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case json.Number:
+		f, _ := x.Float64()
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return f
 	}
-	if code < 200 || code >= 300 {
-		return fmt.Errorf("zentao: get task HTTP %d: %s", code, strings.TrimSpace(string(raw)))
+	return 0
+}
+
+func firstPositive(vals ...float64) float64 {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
 	}
-	var t map[string]any
-	if err := json.Unmarshal(raw, &t); err != nil {
-		return fmt.Errorf("zentao: decode task: %w", err)
+	return 0
+}
+
+// taskDateOr returns the task's date field (date part only) when present and
+// valid, else the fallback (callers pass today as "2006-01-02"). ZenTao stores
+// empty dates as "0000-00-00 ..." and may include a time component.
+func taskDateOr(v any, fallback string) string {
+	s := ""
+	if str, ok := v.(string); ok {
+		s = strings.TrimSpace(str)
 	}
-	payload := map[string]any{
+	if s == "" || strings.HasPrefix(s, "0000-00-00") {
+		return fallback
+	}
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return fallback
+}
+
+// zentaoEditStatus is a sentinel returned in place of an action verb to signal
+// that the transition has no ZenTao action endpoint and must go through the
+// generic full-form PUT /tasks/{id} instead. UpdateTaskStatus routes it to the
+// task path rather than /tasks/{id}/{action}.
+const zentaoEditStatus = "edit"
+
+// zentaoActionForStatus maps a target ZenTao status to its action endpoint verb
+// (PUT /tasks/{id}/{action}) and that action's required payload, derived from the
+// current task. ZenTao 21.7.8 models these transitions as action endpoints —
+// start/finish/close — each with its own required fields; the generic task PUT
+// silently no-ops or 400s ("剩余不能为0") for those. It returns:
+//   - a real action verb ("start"/"finish"/"close") with that action's payload;
+//   - (zentaoEditStatus, zentaoCancelPayload) for cancel, which has no action
+//     endpoint and must use the generic full-form PUT /tasks/{id};
+//   - ("", nil) when the target has no supported path (wait, pause, unknown).
+//     ZenTao 21.7.8 exposes only start/finish/close/activate as task action
+//     endpoints — there is no /pause and no /cancel route; wait/pause are skipped
+//     by the caller.
+func zentaoActionForStatus(target string, t map[string]any, today string) (string, map[string]any) {
+	switch target {
+	case "doing":
+		// start requires left > 0 (a "doing" task must have remaining effort) and
+		// realStarted (the date work began).
+		left := firstPositive(taskNum(t["left"]), taskNum(t["estimate"]), 1)
+		return "start", map[string]any{
+			"left":        left,
+			"realStarted": taskDateOr(t["realStarted"], today),
+		}
+	case "done":
+		// finish requires currentConsumed > 0, realStarted and finishedDate; left
+		// is zeroed.
+		consumed := firstPositive(taskNum(t["consumed"]), taskNum(t["estimate"]), 1)
+		return "finish", map[string]any{
+			"currentConsumed": consumed,
+			"consumed":        consumed,
+			"left":            0,
+			"realStarted":     taskDateOr(t["realStarted"], today),
+			"finishedDate":    taskDateOr(t["finishedDate"], today),
+			"assignedTo":      t["assignedTo"],
+		}
+	case "closed":
+		return "close", map[string]any{}
+	case "cancel":
+		// No /cancel action endpoint; use the generic full-form PUT /tasks/{id}.
+		return zentaoEditStatus, zentaoCancelPayload(t)
+	default: // wait / pause / unknown — no action endpoint
+		return "", nil
+	}
+}
+
+// zentaoCancelPayload builds the generic full-form task PUT body that cancels a
+// task. ZenTao 21.7.8 has NO /tasks/{id}/cancel action endpoint; the verified
+// path (the delete/tombstone flow relies on it) is the generic PUT /tasks/{id}
+// with status=cancel, which revalidates the whole form, so we resend the required
+// fields from the fetched task. Kept deliberately separate from the action-based
+// transition helper above so cancel never routes to an unsupported action route.
+func zentaoCancelPayload(t map[string]any) map[string]any {
+	return map[string]any{
 		"name":      t["name"],
 		"execution": t["execution"],
 		"type":      t["type"],
 		"consumed":  t["consumed"],
-		"status":    status,
+		"status":    "cancel",
 	}
-	raw2, code2, err := c.do(ctx, http.MethodPut, "/tasks/"+taskID, payload)
+}
+
+// UpdateTaskStatus moves a task to the target ZenTao status. Normal transitions
+// use the real action endpoints (PUT /tasks/{id}/{action}: start/finish/close),
+// which apply ZenTao's per-action field rules and where the generic task PUT is
+// unreliable (it revalidates the whole form and silently keeps the old status or
+// 400s on effort fields). cancel has no action endpoint in ZenTao 21.7.8, so it
+// falls back to the generic full-form PUT with status=cancel (the verified delete
+// path). We GET the task first to satisfy per-action requirements (left for
+// start, consumed for finish) and to no-op when already in the target status.
+// Used by controlled outbound sync. Returns applied=false with a nil error when
+// the task is already in the target status or the target has no supported path
+// (wait, pause) — callers can record a "skipped" event for that case versus a
+// "success" when applied=true.
+func (c *Client) UpdateTaskStatus(ctx context.Context, taskID, status string) (applied bool, err error) {
+	raw, code, err := c.do(ctx, http.MethodGet, "/tasks/"+taskID, nil)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if code < 200 || code >= 300 {
+		return false, fmt.Errorf("zentao: get task HTTP %d: %s", code, strings.TrimSpace(string(raw)))
+	}
+	var t map[string]any
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return false, fmt.Errorf("zentao: decode task: %w", err)
+	}
+	if cur, _ := t["status"].(string); cur == status {
+		return false, nil // already in the target status (idempotent skip)
+	}
+	action, payload := zentaoActionForStatus(status, t, time.Now().Format("2006-01-02"))
+	if action == "" {
+		return false, nil // no supported path for this target (wait, pause) — skip
+	}
+	// cancel has no action endpoint; PUT the generic full-form edit instead.
+	path := "/tasks/" + taskID + "/" + action
+	if action == zentaoEditStatus {
+		path = "/tasks/" + taskID
+	}
+	raw2, code2, err := c.do(ctx, http.MethodPut, path, payload)
+	if err != nil {
+		return false, err
 	}
 	if code2 < 200 || code2 >= 300 {
-		return fmt.Errorf("zentao: update task status HTTP %d: %s", code2, strings.TrimSpace(string(raw2)))
+		return false, fmt.Errorf("zentao: task %s HTTP %d: %s", action, code2, strings.TrimSpace(string(raw2)))
 	}
-	return nil
+	return true, nil
 }
