@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/integrations/feishu"
+	githubcontent "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
 	"github.com/multica-ai/multica/server/internal/integrations/zentao"
 	"github.com/multica-ai/multica/server/internal/issueposition"
@@ -1861,7 +1862,7 @@ func (h *Handler) pushIssueStatusOutbound(issue db.Issue, status string, actorUs
 	defer cancel()
 	// One query enforces ALL hybrid gates AND fetches creds/refs.
 	const q = `
-SELECT c.base_url, c.config, a.credential_encrypted, b.external_ref
+SELECT c.id, c.base_url, c.config, a.credential_encrypted, b.external_ref
 FROM integration_connection c
 JOIN integration_project_binding b
   ON b.connection_id = c.id AND b.project_id = $3 AND b.outbound_enabled_at IS NOT NULL
@@ -1871,9 +1872,10 @@ JOIN integration_user_account a
   ON a.connection_id = c.id AND a.user_id = $2 AND a.credential_encrypted IS NOT NULL
 WHERE c.workspace_id = $1 AND c.provider = $4 AND c.status = 'active' AND c.sync_enabled_at IS NOT NULL
 ORDER BY a.account_key LIMIT 1`
+	var connID pgtype.UUID
 	var baseURL pgtype.Text
 	var config, credEnc, externalRef []byte
-	if err := h.DB.QueryRow(ctx, q, issue.WorkspaceID, actorUserID, issue.ProjectID, provider).Scan(&baseURL, &config, &credEnc, &externalRef); err != nil {
+	if err := h.DB.QueryRow(ctx, q, issue.WorkspaceID, actorUserID, issue.ProjectID, provider).Scan(&connID, &baseURL, &config, &credEnc, &externalRef); err != nil {
 		return // a gate is off, or the changer has no credential → skip silently
 	}
 	base := ""
@@ -1897,6 +1899,13 @@ ORDER BY a.account_key LIMIT 1`
 		}
 		if e := gitlab.New(base, string(cred), nil).UpdateIssueState(ctx, ref, iid, stateEvent); e != nil {
 			slog.Warn("outbound status sync failed", "provider", "gitlab", "issue", uuidToString(issue.ID), "error", e)
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"gitlab", "issue", uuidToString(issue.ID), sourceID, "error",
+				"Status outbound to GitLab failed (state "+stateEvent+")", e.Error())
+		} else {
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"gitlab", "issue", uuidToString(issue.ID), sourceID, "success",
+				"Status synced to GitLab (state "+stateEvent+")", "")
 		}
 	case "zentao":
 		zc := zentaoParseCredential(cred)
@@ -1926,6 +1935,13 @@ ORDER BY a.account_key LIMIT 1`
 		done := status == "done" || status == "cancelled"
 		if e := feishu.New(base, "", "", nil).CompleteTask(ctx, at, sourceID, done); e != nil {
 			slog.Warn("outbound status sync failed", "provider", "feishu", "issue", uuidToString(issue.ID), "error", e)
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"feishu", "issue", uuidToString(issue.ID), sourceID, "error",
+				"Status outbound to Feishu failed", e.Error())
+		} else {
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				"feishu", "issue", uuidToString(issue.ID), sourceID, "success",
+				"Status synced to Feishu", "")
 		}
 	}
 }
@@ -1965,7 +1981,7 @@ func (h *Handler) pushIssueCommentOutbound(issue db.Issue, body string, actorUse
 		return
 	}
 	const q = `
-SELECT c.base_url, c.config, a.credential_encrypted, b.external_ref
+SELECT c.id, c.base_url, c.config, a.credential_encrypted, b.external_ref
 FROM integration_connection c
 JOIN integration_project_binding b
   ON b.connection_id = c.id AND b.project_id = $3 AND b.outbound_enabled_at IS NOT NULL
@@ -1975,9 +1991,10 @@ JOIN integration_user_account a
   ON a.connection_id = c.id AND a.user_id = $2 AND a.credential_encrypted IS NOT NULL
 WHERE c.workspace_id = $1 AND c.provider = $4 AND c.status = 'active' AND c.sync_enabled_at IS NOT NULL
 ORDER BY a.account_key LIMIT 1`
+	var connID pgtype.UUID
 	var baseURL pgtype.Text
 	var config, credEnc, externalRef []byte
-	if err := h.DB.QueryRow(ctx, q, issue.WorkspaceID, actorUserID, issue.ProjectID, provider).Scan(&baseURL, &config, &credEnc, &externalRef); err != nil {
+	if err := h.DB.QueryRow(ctx, q, issue.WorkspaceID, actorUserID, issue.ProjectID, provider).Scan(&connID, &baseURL, &config, &credEnc, &externalRef); err != nil {
 		return // a gate is off, or the commenter has no credential → skip silently
 	}
 	base := ""
@@ -1988,6 +2005,18 @@ ORDER BY a.account_key LIMIT 1`
 	if err != nil {
 		return
 	}
+	emit := func(e error) {
+		if e != nil {
+			slog.Warn("outbound comment sync failed", "provider", provider, "issue", uuidToString(issue.ID), "error", e)
+			h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+				provider, "comment", uuidToString(issue.ID), sourceID, "error",
+				"Comment outbound to "+provider+" failed", e.Error())
+			return
+		}
+		h.recordIntegrationOutboundEvent(ctx, issue.WorkspaceID, connID, issue.ProjectID,
+			provider, "comment", uuidToString(issue.ID), sourceID, "success",
+			"Comment synced to "+provider, "")
+	}
 	switch provider {
 	case "gitlab":
 		ref := gitlabProjectRefFromExternalRef(externalRef)
@@ -1995,17 +2024,13 @@ ORDER BY a.account_key LIMIT 1`
 		if ref == "" || perr != nil {
 			return
 		}
-		if e := gitlab.New(base, string(cred), nil).CreateIssueNote(ctx, ref, iid, body); e != nil {
-			slog.Warn("outbound comment sync failed", "provider", "gitlab", "issue", uuidToString(issue.ID), "error", e)
-		}
+		emit(gitlab.New(base, string(cred), nil).CreateIssueNote(ctx, ref, iid, body))
 	case "feishu":
 		at, te := h.feishuUserAccessToken(ctx, issue.WorkspaceID, actorUserID, config)
 		if te != nil {
 			return
 		}
-		if e := feishu.New(base, "", "", nil).CreateTaskComment(ctx, at, sourceID, body); e != nil {
-			slog.Warn("outbound comment sync failed", "provider", "feishu", "issue", uuidToString(issue.ID), "error", e)
-		}
+		emit(feishu.New(base, "", "", nil).CreateTaskComment(ctx, at, sourceID, body))
 	}
 }
 
@@ -2171,6 +2196,41 @@ func (h *Handler) FetchProjectResourceContent(w http.ResponseWriter, r *http.Req
 	}
 
 	switch resource.ResourceType {
+	case "github_repo":
+		repo, branch := githubRepoRefFromResource(resource.ResourceRef)
+		if repo == "" {
+			writeError(w, http.StatusBadRequest, "github resource is missing a repository reference")
+			return
+		}
+		// No github connection/credential exists in the integration module;
+		// the fetch runs unauthenticated, which works for public repos and
+		// returns GitHub's own 404/403 for private ones.
+		gh := githubcontent.New("", nil)
+		if path := strings.TrimSpace(r.URL.Query().Get("path")); path != "" {
+			content, ferr := gh.GetFile(r.Context(), repo, path, branch)
+			if ferr != nil {
+				writeError(w, http.StatusBadGateway, ferr.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"resource_type": "github_repo",
+				"repo":          repo,
+				"path":          path,
+				"content":       content,
+			})
+			return
+		}
+		files, ferr := gh.ListFiles(r.Context(), repo, branch, 200)
+		if ferr != nil {
+			writeError(w, http.StatusBadGateway, ferr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"resource_type": "github_repo",
+			"repo":          repo,
+			"files":         files,
+		})
+		return
 	case "gitlab_repo":
 		conn, credential, cerr := h.providerConnectionCredential(r.Context(), project.WorkspaceID, userUUID, "gitlab")
 		if cerr != "" {
@@ -2289,6 +2349,13 @@ func (h *Handler) FetchProjectResourceContent(w http.ResponseWriter, r *http.Req
 			"folder_token":  folderToken,
 			"files":         files,
 		})
+		return
+	case "local_directory":
+		// A local_directory resource lives on the daemon host's filesystem, not
+		// on the server. The server↔daemon channel is a one-way notify/pull bus
+		// with no file-read RPC, so the server cannot return this content. The
+		// daemon reads the directory directly when it runs a task against it.
+		writeError(w, http.StatusNotImplemented, "content fetch for local_directory is not supported from the server; the daemon reads it directly at task time")
 		return
 	default:
 		writeError(w, http.StatusNotImplemented, "content fetch for "+resource.ResourceType+" is not yet implemented")
@@ -2580,6 +2647,20 @@ func gitlabProjectRefFromExternalRef(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+// githubRepoRefFromResource extracts an "owner/repo" reference and optional
+// branch hint from a github_repo resource_ref JSON object ({"url": ...,
+// "default_branch_hint": ...}).
+func githubRepoRefFromResource(raw []byte) (repo string, branch string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var ref githubRepoRef
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		return "", ""
+	}
+	return githubcontent.RepoFromURL(ref.URL), strings.TrimSpace(ref.DefaultBranchHint)
 }
 
 func metadataString(metadata map[string]any, key string) string {
