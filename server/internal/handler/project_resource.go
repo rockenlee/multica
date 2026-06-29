@@ -200,11 +200,12 @@ func validateFeishuWikiRef(ref json.RawMessage) (json.RawMessage, error) {
 }
 
 type zenTaoProjectRef struct {
-	ProjectID  string `json:"project_id,omitempty"`
-	ProjectKey string `json:"project_key,omitempty"`
-	ProductID  string `json:"product_id,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Label      string `json:"label,omitempty"`
+	ProjectID   string `json:"project_id,omitempty"`
+	ProjectKey  string `json:"project_key,omitempty"`
+	ExecutionID string `json:"execution_id,omitempty"`
+	ProductID   string `json:"product_id,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Label       string `json:"label,omitempty"`
 }
 
 func validateZenTaoProjectRef(ref json.RawMessage) (json.RawMessage, error) {
@@ -214,11 +215,15 @@ func validateZenTaoProjectRef(ref json.RawMessage) (json.RawMessage, error) {
 	}
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
 	payload.ProjectKey = strings.TrimSpace(payload.ProjectKey)
+	payload.ExecutionID = strings.TrimSpace(payload.ExecutionID)
 	payload.ProductID = strings.TrimSpace(payload.ProductID)
 	payload.URL = strings.TrimSpace(payload.URL)
 	payload.Label = strings.TrimSpace(payload.Label)
-	if payload.ProjectID == "" && payload.ProjectKey == "" && payload.URL == "" {
-		return nil, errors.New("zentao_project: project_id, project_key, or url is required")
+	// execution_id pins the resource at a ZenTao execution (kanban) directly,
+	// without needing the page URL. It is accepted alongside the existing
+	// project_id/project_key/url forms for backward compatibility.
+	if payload.ProjectID == "" && payload.ProjectKey == "" && payload.ExecutionID == "" && payload.URL == "" {
+		return nil, errors.New("zentao_project: project_id, project_key, execution_id, or url is required")
 	}
 	if payload.URL != "" && !isValidHTTPURL(payload.URL) {
 		return nil, errors.New("zentao_project: url must be a valid http(s) URL")
@@ -477,6 +482,15 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A zentao_project resource pointing at a ZenTao execution should drive an
+	// inbound-enabled project binding so the scheduler mirrors its tasks; a
+	// project resource alone is invisible to ListInboundSyncTargets. Guard on the
+	// resource type so an unrelated resource whose ref merely contains an
+	// "execution-…" URL can never create or alter a ZenTao binding.
+	if resource.ResourceType == "zentao_project" {
+		h.syncZentaoExecutionBinding(r.Context(), project, resource.ResourceRef, nil, creator)
+	}
+
 	resp := projectResourceToResponse(resource)
 	h.publish(
 		protocol.EventProjectResourceCreated,
@@ -586,6 +600,14 @@ func (h *Handler) UpdateProjectResource(w http.ResponseWriter, r *http.Request) 
 		}
 		writeError(w, http.StatusInternalServerError, "failed to update project resource")
 		return
+	}
+
+	// Keep the inbound binding in sync when the ref changes (e.g. repointed at a
+	// different ZenTao execution). Mirrors the create path. resource_type is
+	// immutable, so the existing type decides whether this is a ZenTao resource.
+	if existing.ResourceType == "zentao_project" {
+		creator, _ := h.parseUserUUIDOrZero(userID)
+		h.syncZentaoExecutionBinding(r.Context(), project, updated.ResourceRef, existing.ResourceRef, creator)
 	}
 
 	resp := projectResourceToResponse(updated)

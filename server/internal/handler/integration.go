@@ -3,8 +3,8 @@ package handler
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1484,6 +1484,12 @@ type InboundSyncTarget struct {
 // units. Joins connection + per-user inbound setting + per-user credential +
 // inbound-enabled project binding.
 func (h *Handler) ListInboundSyncTargets(ctx context.Context) ([]InboundSyncTarget, error) {
+	// Backfill: existing zentao_project resources that resolve to a ZenTao
+	// execution but predate the create/update auto-binding still have no inbound
+	// binding, so they'd be invisible to the query below until re-saved. Reconcile
+	// them here (best-effort) so they're picked up without user action.
+	h.reconcileZentaoExecutionBindings(ctx)
+
 	const q = `
 SELECT c.id, c.workspace_id, c.provider, c.base_url, s.user_id, b.project_id, b.external_ref, a.credential_encrypted, a.account_key, c.config
 FROM integration_connection c
@@ -2026,23 +2032,40 @@ func (h *Handler) FetchProjectResourceContent(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusBadRequest, cerr)
 			return
 		}
-		pid := zentaoProjectIDFromRef(resource.ResourceRef)
-		if pid == "" {
-			writeError(w, http.StatusBadRequest, "zentao resource is missing a project id")
+		target := zentaoTargetFromRef(resource.ResourceRef)
+		if target.ID == "" {
+			writeError(w, http.StatusBadRequest, "zentao resource is missing a project or execution id")
 			return
 		}
 		baseURL := ""
 		if conn.BaseUrl.Valid {
 			baseURL = conn.BaseUrl.String
 		}
-		info, ferr := zentao.New(baseURL, zentaoParseCredential([]byte(credential)).Token, nil).GetProject(r.Context(), pid)
+		client := zentao.New(baseURL, zentaoParseCredential([]byte(credential)).Token, nil)
+		if target.IsExecution {
+			// An execution (kanban) ref points at /executions/{id}, not a
+			// project — return its task list via the execution-specific read
+			// method rather than pretending it's a project.
+			tasks, ferr := client.ListTasks(r.Context(), target.ID)
+			if ferr != nil {
+				writeError(w, http.StatusBadGateway, ferr.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"resource_type": "zentao_project",
+				"execution_id":  target.ID,
+				"tasks":         tasks,
+			})
+			return
+		}
+		info, ferr := client.GetProject(r.Context(), target.ID)
 		if ferr != nil {
 			writeError(w, http.StatusBadGateway, ferr.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"resource_type": "zentao_project",
-			"project_id":    pid,
+			"project_id":    target.ID,
 			"info": map[string]any{
 				"id": info["id"], "name": info["name"], "status": info["status"],
 				"desc": info["desc"], "model": info["model"],
@@ -2087,36 +2110,252 @@ func (h *Handler) FetchProjectResourceContent(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// zentaoProjectIDFromRef extracts a ZenTao project id from a resource_ref JSON
-// ({"project_id":"446"} or a project-index-446.html URL).
-func zentaoProjectIDFromRef(raw []byte) string {
+// zentaoRefTarget is the ZenTao read/poll target resolved from a resource_ref or
+// a binding external_ref. ID is the numeric id; IsExecution distinguishes an
+// execution (kanban) target — which is read via /executions/{id}/tasks — from a
+// plain project target, read via /projects/{id}.
+type zentaoRefTarget struct {
+	ID          string
+	IsExecution bool
+}
+
+// zentaoTargetFromRef resolves a ZenTao target from a resource_ref / external_ref
+// JSON object. It understands:
+//   - explicit keys: execution_id/execution_key/execution (→ execution),
+//     project_id/project_key/id (→ project);
+//   - URL forms: execution-kanban-447.html / execution-task-447.html etc.
+//     (→ execution 447) and project-index-446.html (→ project 446).
+//
+// An explicit execution key wins over a project key, and an execution URL wins
+// over a project-index URL, because the execution endpoint is the one that
+// actually carries the tasks an inbound sync mirrors.
+func zentaoTargetFromRef(raw []byte) zentaoRefTarget {
 	if len(raw) == 0 {
-		return ""
+		return zentaoRefTarget{}
 	}
 	var ref map[string]any
 	if err := json.Unmarshal(raw, &ref); err != nil {
-		return ""
+		return zentaoRefTarget{}
 	}
-	for _, key := range []string{"project_id", "project_key", "id"} {
-		if v, ok := ref[key].(string); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-		if v, ok := ref[key].(float64); ok {
-			return strconv.FormatInt(int64(v), 10)
-		}
+	if id := zentaoRefIDValue(ref, "execution_id", "execution_key", "execution"); id != "" {
+		return zentaoRefTarget{ID: id, IsExecution: true}
+	}
+	if id := zentaoRefIDValue(ref, "project_id", "project_key", "id"); id != "" {
+		return zentaoRefTarget{ID: id}
 	}
 	if u, ok := ref["url"].(string); ok {
+		// Execution URLs look like .../execution-<view>-<id>.html, so the id is
+		// the first digit run after the "execution-" marker.
+		if id := zentaoFirstDigitRunAfter(u, "execution-"); id != "" {
+			return zentaoRefTarget{ID: id, IsExecution: true}
+		}
+		// Project URLs look like .../project-index-<id>.html. Preserve the
+		// original up-to-delimiter extraction (ZenTao ids are numeric, but a
+		// non-numeric project key here should still round-trip).
 		if i := strings.Index(u, "project-index-"); i >= 0 {
 			rest := u[i+len("project-index-"):]
 			if dot := strings.IndexAny(rest, ".?/"); dot >= 0 {
 				rest = rest[:dot]
 			}
 			if rest != "" {
-				return rest
+				return zentaoRefTarget{ID: rest}
 			}
 		}
 	}
+	return zentaoRefTarget{}
+}
+
+// zentaoRefIDValue returns the first non-empty string/number value among keys.
+func zentaoRefIDValue(ref map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch v := ref[key].(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		case float64:
+			return strconv.FormatInt(int64(v), 10)
+		}
+	}
 	return ""
+}
+
+// zentaoFirstDigitRunAfter returns the first run of digits following marker in
+// s, e.g. ("…/execution-kanban-447.html", "execution-") → "447". Returns "" when
+// the marker is absent or no digits follow it.
+func zentaoFirstDigitRunAfter(s, marker string) string {
+	i := strings.Index(s, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(marker):]
+	start := -1
+	for j := 0; j < len(rest); j++ {
+		if rest[j] >= '0' && rest[j] <= '9' {
+			if start < 0 {
+				start = j
+			}
+		} else if start >= 0 {
+			return rest[start:j]
+		}
+	}
+	if start >= 0 {
+		return rest[start:]
+	}
+	return ""
+}
+
+// zentaoProjectIDFromRef extracts the ZenTao id from a resource_ref / external_ref
+// JSON, treating an execution target's id the same as a project id for callers
+// (inbound/outbound task sync) that operate on whichever id the ref points at.
+func zentaoProjectIDFromRef(raw []byte) string {
+	return zentaoTargetFromRef(raw).ID
+}
+
+// syncZentaoExecutionBinding mirrors a zentao_project resource that resolves to a
+// ZenTao execution into an inbound-enabled integration_project_binding, so the
+// scheduler's ListInboundSyncTargets picks it up automatically (a project
+// resource alone is otherwise invisible to inbound sync). Invoked best-effort
+// from resource create/update.
+//
+// It acts only when the ref resolves to an execution and the workspace has
+// exactly one active ZenTao connection. With zero active connections there is
+// nothing to bind to; with several it is ambiguous which one to target, so it
+// stays conservative and does nothing. Existing outbound/issue/knowledge flags
+// on an already-present binding are preserved — only inbound is force-enabled.
+//
+// prevRef is the resource's ref before this change (nil on create). When a
+// resource is repointed from an execution to a non-execution target, the
+// previously auto-created inbound flag is cleared so the old execution stops
+// being polled — but only the inbound flag, leaving any manually enabled
+// outbound/issue/knowledge sync intact.
+func (h *Handler) syncZentaoExecutionBinding(ctx context.Context, project db.Project, resourceRef, prevRef []byte, creator pgtype.UUID) {
+	target := zentaoTargetFromRef(resourceRef)
+	prev := zentaoTargetFromRef(prevRef)
+
+	enabling := target.IsExecution && target.ID != ""
+	// Tear-down case: the new ref is no longer an execution, but the previous
+	// ref was — so an auto-created inbound binding may be left polling a stale
+	// execution. Stay narrow: only react to this specific transition.
+	disabling := !enabling && prev.IsExecution && prev.ID != ""
+	if !enabling && !disabling {
+		return
+	}
+
+	conns, err := h.Queries.ListIntegrationConnections(ctx, project.WorkspaceID)
+	if err != nil {
+		slog.Warn("zentao auto-binding: list connections failed", "workspace_id", uuidToString(project.WorkspaceID), "error", err)
+		return
+	}
+	var active []db.IntegrationConnection
+	for _, c := range conns {
+		if c.Provider == "zentao" && c.Status == "active" {
+			active = append(active, c)
+		}
+	}
+	if len(active) != 1 {
+		return
+	}
+	conn := active[0]
+
+	// Preserve any non-inbound flags a user may already have set on this binding;
+	// the upsert clears unset flags to NULL otherwise.
+	outbound, issueSync, knowledge, inbound, hasBinding := false, false, false, false, false
+	var existingRef []byte
+	if bindings, berr := h.Queries.ListIntegrationProjectBindings(ctx, project.WorkspaceID); berr == nil {
+		for _, b := range bindings {
+			if uuidToString(b.ProjectID) == uuidToString(project.ID) && uuidToString(b.ConnectionID) == uuidToString(conn.ID) {
+				outbound = b.OutboundEnabledAt.Valid
+				issueSync = b.IssueSyncEnabledAt.Valid
+				knowledge = b.KnowledgeSyncEnabledAt.Valid
+				inbound = b.InboundEnabledAt.Valid
+				existingRef = b.ExternalRef
+				hasBinding = true
+				break
+			}
+		}
+	}
+
+	// In the tear-down case there is nothing to do unless an inbound-enabled
+	// binding actually exists; never create a binding just to disable it.
+	if disabling && (!hasBinding || !inbound) {
+		return
+	}
+
+	// Determine the external_ref to store. When enabling, normalize to the
+	// execution id so a later inbound poll resolves it without re-parsing the
+	// page URL. When disabling, repoint at the new (non-execution) target id if
+	// resolvable, otherwise leave the previously stored ref untouched.
+	var externalRef []byte
+	switch {
+	case enabling:
+		externalRef, _ = json.Marshal(map[string]string{"execution_id": target.ID})
+	case target.ID != "":
+		externalRef, _ = json.Marshal(map[string]string{"project_id": target.ID})
+	default:
+		externalRef = existingRef
+	}
+
+	if _, err := h.Queries.UpsertIntegrationProjectBinding(ctx, db.UpsertIntegrationProjectBindingParams{
+		WorkspaceID:          project.WorkspaceID,
+		ProjectID:            project.ID,
+		ConnectionID:         conn.ID,
+		ExternalRef:          externalRef,
+		CreatedByUserID:      creator,
+		InboundEnabled:       enabling,
+		OutboundEnabled:      outbound,
+		IssueSyncEnabled:     issueSync,
+		KnowledgeSyncEnabled: knowledge,
+	}); err != nil {
+		slog.Warn("zentao auto-binding: upsert failed", "workspace_id", uuidToString(project.WorkspaceID), "connection_id", uuidToString(conn.ID), "error", err)
+	}
+}
+
+// reconcileZentaoExecutionBindings backfills inbound bindings for zentao_project
+// resources that resolve to a ZenTao execution but predate the create/update
+// auto-binding (so they never triggered syncZentaoExecutionBinding). It scans all
+// such resources, then routes each execution-resolving one through the same
+// conservative syncZentaoExecutionBinding path — which only binds when the
+// workspace has exactly one active ZenTao connection and preserves any existing
+// outbound/issue/knowledge flags. Best-effort and idempotent: re-running upserts
+// the same binding. prevRef is nil here, so this only enables (never tears down).
+func (h *Handler) reconcileZentaoExecutionBindings(ctx context.Context) {
+	const q = `SELECT project_id, workspace_id, resource_ref, created_by FROM project_resource WHERE resource_type = 'zentao_project'`
+	rows, err := h.DB.Query(ctx, q)
+	if err != nil {
+		slog.Warn("zentao reconcile: list resources failed", "error", err)
+		return
+	}
+	type execResource struct {
+		projectID, workspaceID, creator pgtype.UUID
+		ref                             []byte
+	}
+	var execs []execResource
+	for rows.Next() {
+		var rr execResource
+		if err := rows.Scan(&rr.projectID, &rr.workspaceID, &rr.ref, &rr.creator); err != nil {
+			rows.Close()
+			slog.Warn("zentao reconcile: scan failed", "error", err)
+			return
+		}
+		// Only execution targets need a backfilled inbound binding; skip plain
+		// project resources (and anything that doesn't resolve) without touching
+		// the DB further. This bounds the per-resource binding work below to the
+		// rare execution resources.
+		if t := zentaoTargetFromRef(rr.ref); t.IsExecution && t.ID != "" {
+			execs = append(execs, rr)
+		}
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		slog.Warn("zentao reconcile: iterate resources failed", "error", rowsErr)
+		return
+	}
+
+	for _, rr := range execs {
+		h.syncZentaoExecutionBinding(ctx, db.Project{ID: rr.projectID, WorkspaceID: rr.workspaceID}, rr.ref, nil, rr.creator)
+	}
 }
 
 // gitlabProjectRefFromExternalRef extracts a GitLab project reference (path
