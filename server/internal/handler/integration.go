@@ -1216,9 +1216,6 @@ LIMIT 1`, issue.ID).Scan(&changedAt)
 	if err == nil {
 		return changedAt.UTC()
 	}
-	if issue.CreatedAt.Valid {
-		return issue.CreatedAt.Time.UTC()
-	}
 	return time.Time{}
 }
 

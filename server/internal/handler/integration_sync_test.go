@@ -340,6 +340,43 @@ func TestInboundExternalStatusNewerThanLocalStatusWins(t *testing.T) {
 	}
 }
 
+func TestInboundExternalStatusWinsWithoutLocalStatusActivity(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	conn := seedZentaoConnection(t, ctx, "zentao-inbound-status-no-local-activity")
+	projectID := seedIntegrationStatusProject(t, ctx, "zentao inbound no local activity")
+	const sourceID = "ZT-STATUS-NO-LOCAL-1"
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='zentao' AND metadata->>'source_id'=$2`, testWorkspaceID, sourceID)
+	})
+
+	issue, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao no-local-activity task", nil, "task", sourceID, "", "https://zentao/task-status-no-local", "wait", "2026-06-29T08:00:00Z")
+	if err != nil {
+		t.Fatalf("create mirror: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `DELETE FROM activity_log WHERE issue_id=$1 AND action='status_changed'`, issue.ID); err != nil {
+		t.Fatalf("clear status activity: %v", err)
+	}
+
+	updated, _, event, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao no-local-activity task", nil, "task", sourceID, "", "https://zentao/task-status-no-local", "done", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("update mirror: %v", err)
+	}
+	if updated.Status != "done" {
+		t.Fatalf("issue status = %q, want done", updated.Status)
+	}
+	eventMetadata := parseIssueMetadata(event.Metadata)
+	if applied, _ := eventMetadata["inbound_status_applied"].(bool); !applied {
+		t.Fatalf("inbound_status_applied = %v, want true", eventMetadata["inbound_status_applied"])
+	}
+}
+
 func TestInboundExternalStatusOlderThanLocalStatusDoesNotWin(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("test handler not initialized")
