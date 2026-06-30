@@ -159,16 +159,17 @@ type UpsertIntegrationIssueSyncSettingRequest struct {
 }
 
 type SyncInboundIntegrationIssueRequest struct {
-	Title          string  `json:"title"`
-	Description    *string `json:"description"`
-	SourceType     *string `json:"source_type"`
-	SourceID       string  `json:"source_id"`
-	SourceScope    *string `json:"source_scope"`
-	SourceURL      *string `json:"source_url"`
-	ExternalStatus *string `json:"external_status"`
-	ProjectID      *string `json:"project_id"`
-	ResourceID     *string `json:"resource_id"`
-	AssigneeUserID *string `json:"assignee_user_id"`
+	Title             string  `json:"title"`
+	Description       *string `json:"description"`
+	SourceType        *string `json:"source_type"`
+	SourceID          string  `json:"source_id"`
+	SourceScope       *string `json:"source_scope"`
+	SourceURL         *string `json:"source_url"`
+	ExternalStatus    *string `json:"external_status"`
+	ExternalUpdatedAt *string `json:"external_updated_at"`
+	ProjectID         *string `json:"project_id"`
+	ResourceID        *string `json:"resource_id"`
+	AssigneeUserID    *string `json:"assignee_user_id"`
 }
 
 type SyncInboundIntegrationIssueResponse struct {
@@ -710,6 +711,7 @@ func (h *Handler) SyncInboundIntegrationIssue(w http.ResponseWriter, r *http.Req
 		return
 	}
 	externalStatus := strings.TrimSpace(firstNonEmptyStringPtr(req.ExternalStatus))
+	externalUpdatedAt := strings.TrimSpace(firstNonEmptyStringPtr(req.ExternalUpdatedAt))
 
 	projectID, resourceID, ok := h.resolveInboundIssueProjectResource(w, r, wsUUID, connection.Provider, req.ProjectID, req.ResourceID)
 	if !ok {
@@ -728,7 +730,7 @@ func (h *Handler) SyncInboundIntegrationIssue(w http.ResponseWriter, r *http.Req
 	// — clear any prior deletion tombstone so the mirror can be recreated.
 	_, _ = h.DB.Exec(r.Context(), `DELETE FROM integration_issue_tombstone WHERE workspace_id=$1 AND provider=$2 AND source_scope=$3 AND source_id=$4`, wsUUID, connection.Provider, sourceScope, sourceID)
 
-	issue, status, event, err := h.upsertInboundIntegrationIssue(r.Context(), connection, userUUID, assigneeID, projectID, resourceID, title, req.Description, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
+	issue, status, event, err := h.upsertInboundIntegrationIssue(r.Context(), connection, userUUID, assigneeID, projectID, resourceID, title, req.Description, sourceType, sourceID, sourceScope, sourceURL, externalStatus, externalUpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "external issue is already being synced")
@@ -825,6 +827,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	sourceScope string,
 	sourceURL string,
 	externalStatus string,
+	externalUpdatedAt string,
 ) (db.Issue, string, db.IntegrationSyncEvent, error) {
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
@@ -832,6 +835,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	}
 	defer tx.Rollback(ctx)
 	qtx := h.Queries.WithTx(tx)
+	observedAt := time.Now().UTC()
 
 	existing, err := h.lookupIssueByExternalSourceTx(ctx, tx, qtx, connection.WorkspaceID, connection.Provider, sourceID, sourceScope)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -842,7 +846,11 @@ func (h *Handler) upsertInboundIntegrationIssue(
 	status := "created"
 	var issue db.Issue
 	var eventMessage string
-	metadata, err := buildInboundIssueMetadata(existing.Metadata, connection, resourceID, sourceType, sourceID, sourceScope, sourceURL, externalStatus, title, description)
+	existingMetadata := parseIssueMetadata(existing.Metadata)
+	externalStatus = normalizeExternalStatus(connection.Provider, externalStatus)
+	externalStatusAt := resolveExternalStatusUpdatedAt(existingMetadata, externalStatus, externalUpdatedAt, observedAt)
+	inboundStatus := multicaStatusForExternal(connection.Provider, externalStatus)
+	metadata, err := buildInboundIssueMetadata(existing.Metadata, connection, resourceID, sourceType, sourceID, sourceScope, sourceURL, externalStatus, externalStatusAt, observedAt, title, description)
 	if err != nil {
 		return db.Issue{}, "", db.IntegrationSyncEvent{}, err
 	}
@@ -877,7 +885,11 @@ func (h *Handler) upsertInboundIntegrationIssue(
 		if err != nil {
 			return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("increment issue counter: %w", err)
 		}
-		position, err := issueposition.NextTopPosition(ctx, tx, connection.WorkspaceID, "todo")
+		initialStatus := inboundStatus
+		if initialStatus == "" {
+			initialStatus = "todo"
+		}
+		position, err := issueposition.NextTopPosition(ctx, tx, connection.WorkspaceID, initialStatus)
 		if err != nil {
 			return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("compute issue position: %w", err)
 		}
@@ -885,7 +897,7 @@ func (h *Handler) upsertInboundIntegrationIssue(
 			WorkspaceID:   connection.WorkspaceID,
 			Title:         title,
 			Description:   descriptionText,
-			Status:        "todo",
+			Status:        initialStatus,
 			Priority:      "none",
 			AssigneeType:  pgtype.Text{String: "member", Valid: true},
 			AssigneeID:    assigneeID,
@@ -914,6 +926,20 @@ func (h *Handler) upsertInboundIntegrationIssue(
 		if err != nil {
 			return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("update issue external mirror: %w", err)
 		}
+		if inboundStatus != "" && issue.Status != inboundStatus {
+			localStatusAt := latestIssueStatusChangedAt(ctx, tx, existing)
+			if externalStatusAt.IsZero() || localStatusAt.IsZero() || externalStatusAt.After(localStatusAt) {
+				prevStatus := issue.Status
+				if _, e := tx.Exec(ctx, `UPDATE issue SET status=$1, updated_at=now() WHERE id=$2 AND workspace_id=$3`,
+					inboundStatus, issue.ID, issue.WorkspaceID); e != nil {
+					return db.Issue{}, "", db.IntegrationSyncEvent{}, fmt.Errorf("update issue status from external mirror: %w", e)
+				}
+				issue.Status = inboundStatus
+				if e := recordInboundStatusChangedActivity(ctx, qtx, issue, prevStatus, inboundStatus, connection.Provider, sourceID, externalStatus, externalStatusAt); e != nil {
+					slog.Warn("inbound sync: status activity write failed", "provider", connection.Provider, "source_id", sourceID, "error", e)
+				}
+			}
+		}
 		eventMessage = "Inbound issue updated"
 	}
 
@@ -928,9 +954,13 @@ func (h *Handler) upsertInboundIntegrationIssue(
 
 	issueID := uuidToString(issue.ID)
 	eventMetadata, _ := json.Marshal(map[string]any{
-		"source_type":  sourceType,
-		"source_scope": sourceScope,
-		"sync_hash":    metadataString(parseIssueMetadata(metadata), "sync_hash"),
+		"source_type":                sourceType,
+		"source_scope":               sourceScope,
+		"sync_hash":                  metadataString(parseIssueMetadata(metadata), "sync_hash"),
+		"external_status":            externalStatus,
+		"external_status_updated_at": formatIntegrationTime(externalStatusAt),
+		"inbound_status_applied":     inboundStatus != "" && issue.Status == inboundStatus,
+		"inbound_status_target":      inboundStatus,
 	})
 	event, err := qtx.CreateIntegrationSyncEvent(ctx, db.CreateIntegrationSyncEventParams{
 		WorkspaceID:  connection.WorkspaceID,
@@ -1043,6 +1073,8 @@ func buildInboundIssueMetadata(
 	sourceScope string,
 	sourceURL string,
 	externalStatus string,
+	externalStatusUpdatedAt time.Time,
+	syncedAt time.Time,
 	title string,
 	description *string,
 ) ([]byte, error) {
@@ -1064,9 +1096,12 @@ func buildInboundIssueMetadata(
 	}
 	if externalStatus != "" {
 		metadata["external_status"] = externalStatus
+		if !externalStatusUpdatedAt.IsZero() {
+			metadata["external_status_updated_at"] = formatIntegrationTime(externalStatusUpdatedAt)
+		}
 	}
 	metadata["sync_hash"] = integrationIssueSyncHash(title, description, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
-	metadata["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
+	metadata["last_synced_at"] = formatIntegrationTime(syncedAt)
 	if len(metadata) > maxIssueMetadataKeys {
 		return nil, errors.New("metadata cannot exceed 50 keys")
 	}
@@ -1089,6 +1124,160 @@ func integrationIssueSyncHash(title string, description *string, sourceType stri
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizeExternalStatus(provider, status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch provider {
+	case "gitlab":
+		switch status {
+		case "open":
+			return "opened"
+		case "done":
+			return "closed"
+		}
+	case "zentao":
+		switch status {
+		case "cancelled", "canceled":
+			return "cancel"
+		}
+	case "feishu":
+		switch status {
+		case "complete", "completed", "closed", "true":
+			return "done"
+		case "open", "opened", "incomplete", "false":
+			return "todo"
+		}
+	}
+	return status
+}
+
+func multicaStatusForExternal(provider, status string) string {
+	status = normalizeExternalStatus(provider, status)
+	switch provider {
+	case "gitlab":
+		switch status {
+		case "opened":
+			return "todo"
+		case "closed":
+			return "done"
+		}
+	case "zentao":
+		switch status {
+		case "wait":
+			return "todo"
+		case "doing":
+			return "in_progress"
+		case "done", "closed":
+			return "done"
+		case "pause":
+			return "blocked"
+		case "cancel":
+			return "cancelled"
+		}
+	case "feishu":
+		switch status {
+		case "todo":
+			return "todo"
+		case "done":
+			return "done"
+		}
+	}
+	return ""
+}
+
+func resolveExternalStatusUpdatedAt(existing map[string]any, externalStatus string, externalUpdatedAt string, observedAt time.Time) time.Time {
+	externalStatus = strings.TrimSpace(externalStatus)
+	if externalStatus == "" {
+		return time.Time{}
+	}
+	previousStatus := strings.TrimSpace(metadataString(existing, "external_status"))
+	previousAt := parseIntegrationTime(metadataString(existing, "external_status_updated_at"))
+	if strings.EqualFold(previousStatus, externalStatus) && !previousAt.IsZero() {
+		return previousAt
+	}
+	if parsed := parseIntegrationTime(externalUpdatedAt); !parsed.IsZero() {
+		return parsed
+	}
+	if !observedAt.IsZero() {
+		return observedAt.UTC()
+	}
+	return time.Now().UTC()
+}
+
+func latestIssueStatusChangedAt(ctx context.Context, tx pgx.Tx, issue db.Issue) time.Time {
+	var changedAt time.Time
+	err := tx.QueryRow(ctx, `
+SELECT created_at
+FROM activity_log
+WHERE issue_id=$1 AND action='status_changed'
+ORDER BY created_at DESC, id DESC
+LIMIT 1`, issue.ID).Scan(&changedAt)
+	if err == nil {
+		return changedAt.UTC()
+	}
+	if issue.CreatedAt.Valid {
+		return issue.CreatedAt.Time.UTC()
+	}
+	return time.Time{}
+}
+
+func recordInboundStatusChangedActivity(ctx context.Context, qtx *db.Queries, issue db.Issue, fromStatus, toStatus, provider, sourceID, externalStatus string, externalStatusAt time.Time) error {
+	details := map[string]any{
+		"from":            fromStatus,
+		"to":              toStatus,
+		"source_system":   provider,
+		"source_id":       sourceID,
+		"external_status": externalStatus,
+	}
+	if !externalStatusAt.IsZero() {
+		details["external_status_updated_at"] = formatIntegrationTime(externalStatusAt)
+	}
+	raw, _ := json.Marshal(details)
+	_, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+		ActorType:   pgtype.Text{String: "system", Valid: true},
+		ActorID:     pgtype.UUID{},
+		Action:      "status_changed",
+		Details:     raw,
+	})
+	return err
+}
+
+func parseIntegrationTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "0000-00-00") {
+		return time.Time{}
+	}
+	if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+		switch {
+		case n > 1_000_000_000_000:
+			return time.UnixMilli(n).UTC()
+		case n > 1_000_000_000:
+			return time.Unix(n, 0).UTC()
+		}
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func formatIntegrationTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func resourceProvider(resourceType string) string {
@@ -1663,11 +1852,11 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		assignee = actor
 	}
 	count = 0
-	upsert := func(title string, desc *string, sourceType, sourceID, sourceScope, sourceURL, externalStatus string) (db.Issue, string) {
+	upsert := func(title string, desc *string, sourceType, sourceID, sourceScope, sourceURL, externalStatus, externalUpdatedAt string) (db.Issue, string) {
 		if sourceID == "" {
 			return db.Issue{}, ""
 		}
-		issue, status, _, e := h.upsertInboundIntegrationIssue(ctx, conn, actor, assignee, t.ProjectID, pgtype.UUID{}, title, desc, sourceType, sourceID, sourceScope, sourceURL, externalStatus)
+		issue, status, _, e := h.upsertInboundIntegrationIssue(ctx, conn, actor, assignee, t.ProjectID, pgtype.UUID{}, title, desc, sourceType, sourceID, sourceScope, sourceURL, externalStatus, externalUpdatedAt)
 		if e == nil {
 			count++
 			return issue, status
@@ -1690,7 +1879,7 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		}
 		for _, is := range issues {
 			desc := is.Description
-			upsert(is.Title, &desc, "issue", strconv.FormatInt(is.IID, 10), sourceScope, is.WebURL, is.State)
+			upsert(is.Title, &desc, "issue", strconv.FormatInt(is.IID, 10), sourceScope, is.WebURL, is.State, is.UpdatedAt)
 		}
 	case "zentao":
 		exec := zentaoProjectIDFromRef(t.ExternalRef)
@@ -1715,7 +1904,7 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 		for _, tk := range tasks {
 			desc := tk.Desc
 			url := strings.TrimRight(baseURL, "/") + "/task-view-" + tk.ID + ".html"
-			issue, status := upsert(tk.Name, &desc, "task", tk.ID, "", url, tk.Status)
+			issue, status := upsert(tk.Name, &desc, "task", tk.ID, "", url, tk.Status, tk.UpdatedAt)
 			if issue.ID.Valid && status != "skipped" {
 				taskIssues[tk.ID] = issue
 				if tk.ParentID != "" {
@@ -1781,7 +1970,7 @@ func (h *Handler) SyncInboundTarget(ctx context.Context, t InboundSyncTarget) (c
 			return 0, err
 		}
 		for _, tk := range tasks {
-			upsert(tk.Summary, nil, "feishu_task", tk.GUID, "", tk.URL, "todo")
+			upsert(tk.Summary, nil, "feishu_task", tk.GUID, "", tk.URL, tk.ExternalStatus(), tk.StatusUpdatedAt())
 		}
 	}
 	return count, nil

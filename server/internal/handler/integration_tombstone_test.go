@@ -64,7 +64,7 @@ func TestInboundUpsertSkipsTombstonedItem(t *testing.T) {
 	desc := "should not be created"
 	issue, status, _, err := testHandler.upsertInboundIntegrationIssue(
 		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectID), pgtype.UUID{},
-		"Tombstoned task", &desc, "task", sourceID, "", "https://zentao/task-9001", "open")
+		"Tombstoned task", &desc, "task", sourceID, "", "https://zentao/task-9001", "open", "")
 	if err != nil {
 		t.Fatalf("upsert returned error: %v", err)
 	}

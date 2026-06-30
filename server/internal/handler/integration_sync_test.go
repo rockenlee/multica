@@ -213,13 +213,13 @@ RETURNING id`, testWorkspaceID).Scan(&connID); err != nil {
 	descA, descB := "issue A", "issue B"
 	issueA, _, _, err := testHandler.upsertInboundIntegrationIssue(
 		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectA), pgtype.UUID{},
-		"GitLab IID 1 A", &descA, "issue", "1", integrationSourceScope(conn.ID, "group/a"), "https://gitlab.example.com/group/a/-/issues/1", "opened")
+		"GitLab IID 1 A", &descA, "issue", "1", integrationSourceScope(conn.ID, "group/a"), "https://gitlab.example.com/group/a/-/issues/1", "opened", "")
 	if err != nil {
 		t.Fatalf("upsert issue A: %v", err)
 	}
 	issueB, _, _, err := testHandler.upsertInboundIntegrationIssue(
 		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectB), pgtype.UUID{},
-		"GitLab IID 1 B", &descB, "issue", "1", integrationSourceScope(conn.ID, "group/b"), "https://gitlab.example.com/group/b/-/issues/1", "opened")
+		"GitLab IID 1 B", &descB, "issue", "1", integrationSourceScope(conn.ID, "group/b"), "https://gitlab.example.com/group/b/-/issues/1", "opened", "")
 	if err != nil {
 		t.Fatalf("upsert issue B: %v", err)
 	}
@@ -248,13 +248,13 @@ func TestLinkZentaoTaskParents(t *testing.T) {
 
 	parent, _, _, err := testHandler.upsertInboundIntegrationIssue(
 		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectID), pgtype.UUID{},
-		"ZenTao parent", nil, "task", "ZT-PARENT-1", "", "https://zentao/task-parent", "doing")
+		"ZenTao parent", nil, "task", "ZT-PARENT-1", "", "https://zentao/task-parent", "doing", "")
 	if err != nil {
 		t.Fatalf("upsert parent: %v", err)
 	}
 	child, _, _, err := testHandler.upsertInboundIntegrationIssue(
 		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, parseUUID(projectID), pgtype.UUID{},
-		"ZenTao child", nil, "task", "ZT-CHILD-1", "", "https://zentao/task-child", "doing")
+		"ZenTao child", nil, "task", "ZT-CHILD-1", "", "https://zentao/task-child", "doing", "")
 	if err != nil {
 		t.Fatalf("upsert child: %v", err)
 	}
@@ -269,6 +269,137 @@ func TestLinkZentaoTaskParents(t *testing.T) {
 	}
 	if uuidToString(got.ParentIssueID) != uuidToString(parent.ID) {
 		t.Fatalf("child parent_issue_id = %s, want %s", uuidToString(got.ParentIssueID), uuidToString(parent.ID))
+	}
+}
+
+func TestInboundExternalStatusCreatesIssueWithMappedStatus(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	conn := seedZentaoConnection(t, ctx, "zentao-inbound-status-create")
+	projectID := seedIntegrationStatusProject(t, ctx, "zentao inbound status create")
+	const sourceID = "ZT-STATUS-CREATE-1"
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='zentao' AND metadata->>'source_id'=$2`, testWorkspaceID, sourceID)
+	})
+
+	issue, status, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao finished task", nil, "task", sourceID, "", "https://zentao/task-status-create", "done", "2026-06-29T08:00:00Z")
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	if status != "created" {
+		t.Fatalf("sync status = %q, want created", status)
+	}
+	if issue.Status != "done" {
+		t.Fatalf("issue status = %q, want done", issue.Status)
+	}
+	metadata := parseIssueMetadata(issue.Metadata)
+	if got := metadataString(metadata, "external_status"); got != "done" {
+		t.Fatalf("external_status = %q, want done", got)
+	}
+	if got := metadataString(metadata, "external_status_updated_at"); got != "2026-06-29T08:00:00Z" {
+		t.Fatalf("external_status_updated_at = %q, want 2026-06-29T08:00:00Z", got)
+	}
+}
+
+func TestInboundExternalStatusNewerThanLocalStatusWins(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	conn := seedZentaoConnection(t, ctx, "zentao-inbound-status-newer")
+	projectID := seedIntegrationStatusProject(t, ctx, "zentao inbound status newer")
+	const sourceID = "ZT-STATUS-NEWER-1"
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='zentao' AND metadata->>'source_id'=$2`, testWorkspaceID, sourceID)
+	})
+
+	issue, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao status task", nil, "task", sourceID, "", "https://zentao/task-status-newer", "wait", "2026-06-29T08:00:00Z")
+	if err != nil {
+		t.Fatalf("create mirror: %v", err)
+	}
+	setIssueStatusWithActivityAt(t, ctx, issue, "todo", "in_progress", time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC))
+
+	updated, _, event, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao status task", nil, "task", sourceID, "", "https://zentao/task-status-newer", "done", "2026-06-29T10:00:00Z")
+	if err != nil {
+		t.Fatalf("update mirror: %v", err)
+	}
+	if updated.Status != "done" {
+		t.Fatalf("issue status = %q, want done", updated.Status)
+	}
+	eventMetadata := parseIssueMetadata(event.Metadata)
+	if applied, _ := eventMetadata["inbound_status_applied"].(bool); !applied {
+		t.Fatalf("inbound_status_applied = %v, want true", eventMetadata["inbound_status_applied"])
+	}
+}
+
+func TestInboundExternalStatusOlderThanLocalStatusDoesNotWin(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test handler not initialized")
+	}
+	ctx := context.Background()
+	conn := seedZentaoConnection(t, ctx, "zentao-inbound-status-local-newer")
+	projectID := seedIntegrationStatusProject(t, ctx, "zentao inbound status local newer")
+	const sourceID = "ZT-STATUS-LOCAL-NEWER-1"
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE workspace_id=$1 AND metadata->>'source_system'='zentao' AND metadata->>'source_id'=$2`, testWorkspaceID, sourceID)
+	})
+
+	issue, _, _, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao local-newer task", nil, "task", sourceID, "", "https://zentao/task-status-local-newer", "wait", "2026-06-29T08:00:00Z")
+	if err != nil {
+		t.Fatalf("create mirror: %v", err)
+	}
+	setIssueStatusWithActivityAt(t, ctx, issue, "todo", "in_progress", time.Date(2026, 6, 29, 10, 0, 0, 0, time.UTC))
+
+	updated, _, event, err := testHandler.upsertInboundIntegrationIssue(
+		ctx, conn, parseUUID(testUserID), pgtype.UUID{}, projectID, pgtype.UUID{},
+		"ZenTao local-newer task", nil, "task", sourceID, "", "https://zentao/task-status-local-newer", "done", "2026-06-29T09:00:00Z")
+	if err != nil {
+		t.Fatalf("update mirror: %v", err)
+	}
+	if updated.Status != "in_progress" {
+		t.Fatalf("issue status = %q, want in_progress", updated.Status)
+	}
+	metadata := parseIssueMetadata(updated.Metadata)
+	if got := metadataString(metadata, "external_status"); got != "done" {
+		t.Fatalf("external_status = %q, want done", got)
+	}
+	eventMetadata := parseIssueMetadata(event.Metadata)
+	if applied, _ := eventMetadata["inbound_status_applied"].(bool); applied {
+		t.Fatalf("inbound_status_applied = true, want false")
+	}
+}
+
+func seedIntegrationStatusProject(t *testing.T, ctx context.Context, title string) pgtype.UUID {
+	t.Helper()
+	var projectID string
+	if err := testPool.QueryRow(ctx, `INSERT INTO project (workspace_id, title) VALUES ($1, $2) RETURNING id`, testWorkspaceID, title).Scan(&projectID); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM project WHERE id=$1`, projectID) })
+	return parseUUID(projectID)
+}
+
+func setIssueStatusWithActivityAt(t *testing.T, ctx context.Context, issue db.Issue, fromStatus, toStatus string, changedAt time.Time) {
+	t.Helper()
+	if _, err := testPool.Exec(ctx, `UPDATE issue SET status=$1, updated_at=$2 WHERE id=$3 AND workspace_id=$4`, toStatus, changedAt, issue.ID, issue.WorkspaceID); err != nil {
+		t.Fatalf("set issue status: %v", err)
+	}
+	details, _ := json.Marshal(map[string]string{"from": fromStatus, "to": toStatus})
+	if _, err := testPool.Exec(ctx, `
+INSERT INTO activity_log (workspace_id, issue_id, actor_type, actor_id, action, details, created_at)
+VALUES ($1, $2, 'member', $3, 'status_changed', $4, $5)`,
+		issue.WorkspaceID, issue.ID, parseUUID(testUserID), details, changedAt); err != nil {
+		t.Fatalf("insert status activity: %v", err)
 	}
 }
 

@@ -107,22 +107,33 @@ func (c *Client) Login(ctx context.Context, account, password string) (string, e
 
 // Task is a listed ZenTao task used for inbound mirroring.
 type Task struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Desc     string `json:"desc"`
-	Status   string `json:"status"`
-	ParentID string `json:"parent_id,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Desc      string `json:"desc"`
+	Status    string `json:"status"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	ParentID  string `json:"parent_id,omitempty"`
 }
 
 func (t *Task) UnmarshalJSON(raw []byte) error {
 	var aux struct {
-		ID            any `json:"id"`
-		Name          any `json:"name"`
-		Desc          any `json:"desc"`
-		Status        any `json:"status"`
-		Parent        any `json:"parent"`
-		ParentID      any `json:"parentID"`
-		ParentIDSnake any `json:"parent_id"`
+		ID             any `json:"id"`
+		Name           any `json:"name"`
+		Desc           any `json:"desc"`
+		Status         any `json:"status"`
+		Parent         any `json:"parent"`
+		ParentID       any `json:"parentID"`
+		ParentIDSnake  any `json:"parent_id"`
+		LastEditedDate any `json:"lastEditedDate"`
+		LastEdited     any `json:"lastEdited"`
+		EditedDate     any `json:"editedDate"`
+		UpdatedAt      any `json:"updatedAt"`
+		UpdatedAtSnake any `json:"updated_at"`
+		FinishedDate   any `json:"finishedDate"`
+		ClosedDate     any `json:"closedDate"`
+		AssignedDate   any `json:"assignedDate"`
+		OpenedDate     any `json:"openedDate"`
+		CreatedAt      any `json:"createdAt"`
 	}
 	if err := json.Unmarshal(raw, &aux); err != nil {
 		return err
@@ -132,6 +143,24 @@ func (t *Task) UnmarshalJSON(raw []byte) error {
 	t.Desc = taskFieldString(aux.Desc)
 	t.Status = taskFieldString(aux.Status)
 	t.ParentID = firstTaskID(taskFieldString(aux.Parent), taskFieldString(aux.ParentID), taskFieldString(aux.ParentIDSnake))
+	baseUpdatedAt := firstTaskTimestamp(
+		taskFieldString(aux.LastEditedDate),
+		taskFieldString(aux.LastEdited),
+		taskFieldString(aux.EditedDate),
+		taskFieldString(aux.UpdatedAt),
+		taskFieldString(aux.UpdatedAtSnake),
+		taskFieldString(aux.AssignedDate),
+		taskFieldString(aux.OpenedDate),
+		taskFieldString(aux.CreatedAt),
+	)
+	switch strings.ToLower(t.Status) {
+	case "done":
+		t.UpdatedAt = firstTaskTimestamp(taskFieldString(aux.FinishedDate), baseUpdatedAt)
+	case "closed":
+		t.UpdatedAt = firstTaskTimestamp(taskFieldString(aux.ClosedDate), baseUpdatedAt)
+	default:
+		t.UpdatedAt = baseUpdatedAt
+	}
 	return nil
 }
 
@@ -141,6 +170,17 @@ func firstTaskID(vals ...string) string {
 		if v != "" && v != "0" {
 			return v
 		}
+	}
+	return ""
+}
+
+func firstTaskTimestamp(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || v == "0" || strings.HasPrefix(v, "0000-00-00") {
+			continue
+		}
+		return v
 	}
 	return ""
 }

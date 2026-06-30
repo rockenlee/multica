@@ -2493,10 +2493,13 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	assigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil) &&
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := req.Status != nil && prevIssue.Status != issue.Status
+	// Determine actor identity: agent (via X-Agent-ID header) or member.
+	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	// Controlled outbound: when a MIRRORED issue's status changes, sync it back
 	// to its external source (async, hybrid-gated inside the helper; native
 	// issues are ignored). Identity = the changer's own provider credential.
 	if statusChanged {
+		h.recordIssueStatusChangedActivity(r.Context(), issue, actorType, actorID, prevIssue.Status, issue.Status)
 		if changer, perr := parseUUIDLoose(userID); perr == nil {
 			go h.pushIssueStatusOutbound(issue, issue.Status, changer)
 		}
@@ -2510,9 +2513,6 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	prevDueDate := dateToPtr(prevIssue.DueDate)
 	dueDateChanged := prevDueDate != resp.DueDate && (prevDueDate == nil) != (resp.DueDate == nil) ||
 		(prevDueDate != nil && resp.DueDate != nil && *prevDueDate != *resp.DueDate)
-
-	// Determine actor identity: agent (via X-Agent-ID header) or member.
-	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 
 	h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, map[string]any{
 		"issue":               resp,
@@ -2588,6 +2588,30 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) recordIssueStatusChangedActivity(ctx context.Context, issue db.Issue, actorType, actorID, fromStatus, toStatus string) {
+	if fromStatus == toStatus {
+		return
+	}
+	details, _ := json.Marshal(map[string]string{"from": fromStatus, "to": toStatus})
+	actorUUID := pgtype.UUID{}
+	if parsed, err := parseUUIDLoose(actorID); err == nil {
+		actorUUID = parsed
+	}
+	if actorType == "" {
+		actorType = "system"
+	}
+	if _, err := h.Queries.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+		ActorType:   pgtype.Text{String: actorType, Valid: true},
+		ActorID:     actorUUID,
+		Action:      "status_changed",
+		Details:     details,
+	}); err != nil {
+		slog.Warn("record issue status activity failed", "issue_id", uuidToString(issue.ID), "error", err)
+	}
 }
 
 // validateAssigneePair verifies the (assignee_type, assignee_id) pair refers
@@ -3036,6 +3060,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 		statusChanged := req.Updates.Status != nil && prevIssue.Status != issue.Status
 		priorityChanged := req.Updates.Priority != nil && prevIssue.Priority != issue.Priority
+		if statusChanged {
+			h.recordIssueStatusChangedActivity(r.Context(), issue, actorType, actorID, prevIssue.Status, issue.Status)
+		}
 
 		h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, map[string]any{
 			"issue":            resp,

@@ -178,9 +178,90 @@ func (c *Client) RefreshUserToken(ctx context.Context, appID, appSecret, refresh
 
 // Task is a listed Feishu task used for inbound mirroring.
 type Task struct {
-	GUID    string `json:"guid"`
-	Summary string `json:"summary"`
-	URL     string `json:"url"`
+	GUID        string `json:"guid"`
+	Summary     string `json:"summary"`
+	URL         string `json:"url"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+}
+
+func (t *Task) UnmarshalJSON(raw []byte) error {
+	var aux struct {
+		GUID          any `json:"guid"`
+		Summary       any `json:"summary"`
+		URL           any `json:"url"`
+		CompletedAt   any `json:"completed_at"`
+		UpdatedAt     any `json:"updated_at"`
+		UpdateTime    any `json:"update_time"`
+		ModifiedTime  any `json:"modified_time"`
+		CompletedTime any `json:"completed_time"`
+	}
+	if err := json.Unmarshal(raw, &aux); err != nil {
+		return err
+	}
+	t.GUID = feishuTaskFieldString(aux.GUID)
+	t.Summary = feishuTaskFieldString(aux.Summary)
+	t.URL = feishuTaskFieldString(aux.URL)
+	t.CompletedAt = firstFeishuTaskTimestamp(feishuTaskFieldString(aux.CompletedAt), feishuTaskFieldString(aux.CompletedTime))
+	t.UpdatedAt = firstFeishuTaskTimestamp(
+		feishuTaskFieldString(aux.UpdatedAt),
+		feishuTaskFieldString(aux.UpdateTime),
+		feishuTaskFieldString(aux.ModifiedTime),
+	)
+	return nil
+}
+
+func (t Task) ExternalStatus() string {
+	if t.IsDone() {
+		return "done"
+	}
+	return "todo"
+}
+
+func (t Task) StatusUpdatedAt() string {
+	if t.IsDone() && t.CompletedAt != "" {
+		return t.CompletedAt
+	}
+	return t.UpdatedAt
+}
+
+func (t Task) IsDone() bool {
+	completedAt := strings.TrimSpace(t.CompletedAt)
+	if completedAt == "" || completedAt == "0" {
+		return false
+	}
+	if n, err := strconv.ParseInt(completedAt, 10, 64); err == nil {
+		return n > 0
+	}
+	return strings.EqualFold(completedAt, "true") || strings.EqualFold(completedAt, "done")
+}
+
+func firstFeishuTaskTimestamp(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || v == "0" {
+			continue
+		}
+		return v
+	}
+	return ""
+}
+
+func feishuTaskFieldString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case json.Number:
+		return strings.TrimSpace(x.String())
+	case bool:
+		return strconv.FormatBool(x)
+	}
+	return ""
 }
 
 // ListTasksWithUserToken lists the tasks visible to a user, using that user's
