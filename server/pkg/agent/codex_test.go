@@ -1125,6 +1125,9 @@ func TestCodexStartOrResumeThreadResumesPriorThread(t *testing.T) {
 				if params["cwd"] != "/work" {
 					t.Errorf("cwd = %v, want /work", params["cwd"])
 				}
+				if params["excludeTurns"] != true {
+					t.Errorf("excludeTurns = %v, want true", params["excludeTurns"])
+				}
 			},
 		},
 	})
@@ -1146,6 +1149,50 @@ func TestCodexStartOrResumeThreadResumesPriorThread(t *testing.T) {
 	}
 }
 
+func TestCodexStartOrResumeThreadRetriesLegacyResumeWhenExcludeTurnsIsUnsupported(t *testing.T) {
+	t.Parallel()
+
+	c, fs, _ := newTestCodexClient(t)
+
+	wait := drainRPCScript(t, c, fs, []rpcResponse{
+		{
+			method:  "thread/resume",
+			errMsg:  "unknown field excludeTurns",
+			errCode: -32602,
+			assertFn: func(t *testing.T, params map[string]any) {
+				if params["excludeTurns"] != true {
+					t.Errorf("excludeTurns = %v, want true", params["excludeTurns"])
+				}
+			},
+		},
+		{
+			method: "thread/resume",
+			result: json.RawMessage(`{"thread":{"id":"thr_legacy"}}`),
+			assertFn: func(t *testing.T, params map[string]any) {
+				if _, ok := params["excludeTurns"]; ok {
+					t.Errorf("legacy resume must omit excludeTurns, got %v", params["excludeTurns"])
+				}
+			},
+		},
+	})
+	defer wait()
+
+	threadID, resumed, err := c.startOrResumeThread(
+		context.Background(),
+		ExecOptions{Cwd: "/work", ResumeSessionID: "thr_legacy"},
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatalf("startOrResumeThread: %v", err)
+	}
+	if threadID != "thr_legacy" {
+		t.Errorf("threadID = %q, want legacy resumed thread", threadID)
+	}
+	if !resumed {
+		t.Error("resumed should be true after legacy retry")
+	}
+}
+
 func TestCodexStartOrResumeThreadFallsBackOnResumeError(t *testing.T) {
 	t.Parallel()
 
@@ -1156,6 +1203,21 @@ func TestCodexStartOrResumeThreadFallsBackOnResumeError(t *testing.T) {
 			method:  "thread/resume",
 			errMsg:  "unknown thread",
 			errCode: -32602,
+			assertFn: func(t *testing.T, params map[string]any) {
+				if params["excludeTurns"] != true {
+					t.Errorf("excludeTurns = %v, want true", params["excludeTurns"])
+				}
+			},
+		},
+		{
+			method:  "thread/resume",
+			errMsg:  "unknown thread",
+			errCode: -32602,
+			assertFn: func(t *testing.T, params map[string]any) {
+				if _, ok := params["excludeTurns"]; ok {
+					t.Errorf("legacy resume must omit excludeTurns, got %v", params["excludeTurns"])
+				}
+			},
 		},
 		{
 			method: "thread/start",
@@ -1445,6 +1507,90 @@ func TestCodexExecuteTimesOutWhenTurnStopsAfterToolResult(t *testing.T) {
 	}
 	if result.SessionID != "thr-stale" {
 		t.Fatalf("expected session id to be preserved, got %q", result.SessionID)
+	}
+}
+
+func TestCodexExecuteHandlesResumeResponseLargerThanScannerLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	largeResponsePath := filepath.Join(t.TempDir(), "large-resume-response.json")
+	largeResponse := `{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thr-large","padding":"` +
+		strings.Repeat("x", 11*1024*1024) +
+		`"}}}` + "\n"
+	if err := os.WriteFile(largeResponsePath, []byte(largeResponse), 0o600); err != nil {
+		t.Fatalf("write large response: %v", err)
+	}
+
+	fakePath := writeFakeCodexAppServer(t, ""+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read line`+"\n"+
+		`read line`+"\n"+
+		fmt.Sprintf("cat %q\n", largeResponsePath)+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":3,"result":{}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thr-large","turn":{"id":"turn-large"}}}'`+"\n"+
+		`echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-large","turn":{"id":"turn-large","status":"completed"}}}'`+"\n")
+
+	result := executeFakeCodex(t, fakePath, ExecOptions{
+		Timeout:                   5 * time.Second,
+		SemanticInactivityTimeout: 5 * time.Second,
+		ResumeSessionID:           "thr-large",
+	})
+	if result.Status != "completed" {
+		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+	}
+	if result.SessionID != "thr-large" {
+		t.Fatalf("session id = %q, want thr-large", result.SessionID)
+	}
+}
+
+func TestCodexExecuteReturnsPromptlyWhenResumeTransportDies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := writeFakeCodexAppServer(t, ""+
+		`read line`+"\n"+
+		`echo '{"jsonrpc":"2.0","id":1,"result":{}}'`+"\n"+
+		`read line`+"\n"+
+		`read line`+"\n"+
+		`exec 1>&-`+"\n"+
+		`exec sleep 300`+"\n")
+
+	startedAt := time.Now()
+	result := executeFakeCodex(t, fakePath, ExecOptions{
+		Timeout:         30 * time.Second,
+		ResumeSessionID: "thr-stale",
+	})
+	if elapsed := time.Since(startedAt); elapsed >= 5*time.Second {
+		t.Fatalf("transport failure result took %s, want less than 5s", elapsed.Round(time.Millisecond))
+	}
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed (error=%q)", result.Status, result.Error)
+	}
+	if result.SessionID != "" {
+		t.Fatalf("session id = %q, want empty so daemon can retry fresh", result.SessionID)
+	}
+	if !strings.Contains(result.Error, "thread/resume failed") {
+		t.Fatalf("error = %q, want thread/resume failure", result.Error)
+	}
+}
+
+func TestReadCodexOutputLinesDeliversFinalLineWithoutNewline(t *testing.T) {
+	t.Parallel()
+
+	var lines []string
+	err := readCodexOutputLines(strings.NewReader(" first \n\nlast"), func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil {
+		t.Fatalf("readCodexOutputLines: %v", err)
+	}
+	if want := []string{"first", "last"}; !reflect.DeepEqual(lines, want) {
+		t.Fatalf("lines = %v, want %v", lines, want)
 	}
 }
 
