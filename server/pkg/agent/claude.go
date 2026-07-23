@@ -807,6 +807,10 @@ func writeMcpConfigToTemp(raw json.RawMessage) (string, error) {
 func detectCLIVersion(ctx context.Context, execPath string) (string, error) {
 	cmd := exec.CommandContext(ctx, execPath, "--version")
 	hideAgentWindow(cmd)
+	// A CLI shim may spawn a child that inherits stdout/stderr. If the
+	// context kills only the shim, that child can otherwise keep Output
+	// waiting for pipe EOF indefinitely.
+	cmd.WaitDelay = 2 * time.Second
 	data, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("detect version for %s: %w", execPath, err)

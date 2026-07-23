@@ -44,8 +44,9 @@ var ErrRepoNotConfigured = errors.New("repo is not configured for this workspace
 var ErrNoRuntimesToRegister = errors.New("no agent runtimes could be registered")
 
 const (
-	taskSlotWaitTimeout     = 2 * time.Second
-	taskSlotCapacityBackoff = 5 * time.Second
+	taskSlotWaitTimeout             = 2 * time.Second
+	taskSlotCapacityBackoff         = 5 * time.Second
+	defaultAgentVersionProbeTimeout = 20 * time.Second
 )
 
 func taskScopedAuthToken(task Task) (string, error) {
@@ -155,11 +156,14 @@ type Daemon struct {
 	// command resolves; read by runTask via customCommandPathForRuntime to
 	// launch the custom command for a claimed task. Guarded by mu.
 	profileCommandPaths map[string]string
-	reloading    sync.Mutex         // prevents concurrent workspace syncs
-	runtimeSet   *runtimeSetWatcher // multi-subscriber pub/sub for runtime-set changes
+	reloading           sync.Mutex         // prevents concurrent workspace syncs
+	runtimeSet          *runtimeSetWatcher // multi-subscriber pub/sub for runtime-set changes
 
 	versionsMu    sync.RWMutex      // guards agentVersions
 	agentVersions map[string]string // provider -> detected CLI version (set during registration)
+	// versionProbeTimeout bounds each optional agent's `--version` command.
+	// A zero value uses defaultAgentVersionProbeTimeout.
+	versionProbeTimeout time.Duration
 
 	wsHBMu      sync.RWMutex         // guards wsHBLastAck
 	wsHBLastAck map[string]time.Time // runtime_id -> last successful WS heartbeat ack timestamp
@@ -887,12 +891,37 @@ func (d *Daemon) customCommandPathForRuntime(runtimeID string) (string, bool) {
 	return path, true
 }
 
+func (d *Daemon) effectiveVersionProbeTimeout() time.Duration {
+	probeTimeout := d.versionProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = defaultAgentVersionProbeTimeout
+	}
+	return probeTimeout
+}
+
+func (d *Daemon) probeAgentVersion(ctx context.Context, path string) (string, bool, error) {
+	probeTimeout := d.effectiveVersionProbeTimeout()
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	version, err := detectAgentVersion(probeCtx, path)
+	timedOut := errors.Is(probeCtx.Err(), context.DeadlineExceeded)
+	cancel()
+	return version, timedOut, err
+}
+
 func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID string) (*RegisterResponse, string, error) {
 	d.logger.Debug("registering runtimes for workspace", "workspace_id", workspaceID, "agent_count", len(d.cfg.Agents))
 	var runtimes []map[string]string
 	for name, entry := range d.cfg.Agents {
-		version, err := detectAgentVersion(ctx, entry.Path)
+		version, timedOut, err := d.probeAgentVersion(ctx, entry.Path)
 		if err != nil {
+			if timedOut {
+				d.logger.Warn("skip registering runtime: version probe timed out",
+					"name", name,
+					"path", entry.Path,
+					"timeout", d.effectiveVersionProbeTimeout(),
+				)
+				continue
+			}
 			d.logger.Warn("skip registering runtime", "name", name, "error", err)
 			continue
 		}
@@ -1037,10 +1066,19 @@ func (d *Daemon) appendProfileRuntimes(ctx context.Context, workspaceID string, 
 			resolved = r
 		}
 		// Best-effort version detection; an empty version is acceptable.
-		version, verErr := detectAgentVersion(ctx, resolved)
+		version, timedOut, verErr := d.probeAgentVersion(ctx, resolved)
 		if verErr != nil {
-			d.logger.Debug("custom runtime profile: version probe failed (registering with empty version)",
-				"workspace_id", workspaceID, "profile_id", profile.ID, "path", resolved, "error", verErr)
+			if timedOut {
+				d.logger.Warn("custom runtime profile: version probe timed out (registering with empty version)",
+					"workspace_id", workspaceID,
+					"profile_id", profile.ID,
+					"path", resolved,
+					"timeout", d.effectiveVersionProbeTimeout(),
+				)
+			} else {
+				d.logger.Debug("custom runtime profile: version probe failed (registering with empty version)",
+					"workspace_id", workspaceID, "profile_id", profile.ID, "path", resolved, "error", verErr)
+			}
 			version = ""
 		}
 		displayName := profile.DisplayName

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -83,6 +85,25 @@ func TestDetectVersionFailsForMissingBinary(t *testing.T) {
 	_, err := DetectVersion(context.Background(), "/nonexistent/binary")
 	if err == nil {
 		t.Fatal("expected error for missing binary")
+	}
+}
+
+func TestDetectVersionContextBoundsInheritedOutputPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := filepath.Join(t.TempDir(), "slow-version")
+	writeTestExecutable(t, fakePath, []byte("#!/bin/sh\n(trap '' HUP TERM; sleep 6) &\nsleep 6\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	if _, err := DetectVersion(ctx, fakePath); err == nil {
+		t.Fatal("DetectVersion should fail after its context deadline")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 4*time.Second {
+		t.Fatalf("DetectVersion took %s, want less than 4s", elapsed.Round(time.Millisecond))
 	}
 }
 
