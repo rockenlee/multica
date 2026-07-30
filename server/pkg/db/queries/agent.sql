@@ -146,6 +146,25 @@ VALUES (
 )
 RETURNING *;
 
+-- name: CreateIdempotentAgentTask :one
+-- Creates at most one callback task for a stable protocol event. The no-op
+-- conflict update returns the previously created task to concurrent/retried
+-- callers; `inserted` tells the service whether it should publish/notify.
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
+    trigger_summary, force_fresh_session, is_leader_task, idempotency_key
+)
+VALUES (
+    $1, $2, $3, 'queued', $4, sqlc.narg(trigger_comment_id),
+    sqlc.narg(trigger_summary),
+    COALESCE(sqlc.narg('force_fresh_session')::boolean, FALSE),
+    COALESCE(sqlc.narg('is_leader_task')::boolean, FALSE),
+    @idempotency_key
+)
+ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+RETURNING agent_task_queue.id, (xmax = 0) AS inserted;
+
 -- name: CreateQuickCreateTask :one
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The

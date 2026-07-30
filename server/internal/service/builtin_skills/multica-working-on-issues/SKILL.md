@@ -1,20 +1,61 @@
 ---
 name: multica-working-on-issues
-description: "Use when working on a Multica issue after the runtime has provided the trigger context — to apply the product contracts the runtime brief does not encode: how PR linking differs from close intent, how to read a linked PR's real state via the pull-requests CLI, which metadata keys are high-signal, what status changes trigger on the server, and how sub-issue create status (todo vs backlog) controls whether assigned agents start immediately."
+description: "Use when working on a Multica issue after the runtime has provided the trigger context — to apply the product contracts the runtime brief does not encode: machine-validated agent-run/v1 coordination, how PR linking differs from close intent, how to read a linked PR's real state, which metadata keys are high-signal, what status changes trigger, and how sub-issue status controls whether assigned agents start."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *)
 ---
 
 # Working on Multica issues
 
-Product contracts the runtime brief does not fully encode: PR linking vs close
-intent, reading linked-PR state, metadata keys, status side effects, and
-sub-issue enqueue behavior.
+Product contracts the runtime brief does not fully encode: machine-validated
+agent-run coordination, PR linking vs close intent, linked-PR state, metadata
+keys, status side effects, and sub-issue enqueue behavior.
 
 For building mention links, load `multica-mentioning` instead — not this skill.
 
 Every contract below is traced to source in
 `references/working-on-issues-source-map.md`.
+
+## `agent-run/v1` state belongs in the control plane
+
+When an issue uses the `agent-run/v1` protocol, do not coordinate the run by
+manually setting `run.*` metadata or by treating comments as authoritative
+state. The dispatch authority creates and updates one structured contract:
+
+```bash
+multica issue agent-run create <issue-id> \
+  --contract-file /path/to/run.json \
+  --issue-status-mode follow_run
+
+multica issue agent-run get <issue-id> <run-id>
+
+multica issue agent-run update <issue-id> \
+  --contract-file /path/to/next-run.json \
+  --expected-revision <current-revision>
+```
+
+The create contract must start at `status: draft`. Before every update, read the
+current record and use its `revision`; a stale revision is rejected rather than
+silently overwriting another worker. Only the declared Multica dispatch
+authority can create or mutate the run.
+
+Both CLI and server validate the document. The server additionally requires the
+exact protocol package version/hash compiled into the runtime and enforces real
+workspace agent identities, immutable active-step semantics, legal state
+transitions, independent reviewer steps for M/L PASS, three-cycle review
+budget, non-empty acceptance/verification, executor-produced evidence,
+acceptance-to-evidence coverage, approval evidence for external writes, no
+overlapping active writable scope, no terminal state while platform tasks
+remain active, and atomic issue-status reconciliation. A draft cannot contain
+running work. Once an active Run exists, the real task queue admits only an
+executor whose validated step is `running` and whose identity appears in
+`active_workers`; comments and assignments cannot bypass that gate. Reserved
+`run.*` metadata is a read model synchronized by the server; it is not the
+write API.
+
+Use `--issue-status-mode none` only when another explicitly named control plane
+owns issue status. Otherwise `follow_run` keeps the issue aligned with the
+validated run.
 
 ## PR linking and close intent are two distinct contracts
 
@@ -100,11 +141,13 @@ a draft?" is `state == "draft"`; CI status is `checks_conclusion`.
 If the command returns no linked PRs after a PR was opened, the link scanner did
 not observe a routable issue key in the PR title/body/branch.
 
-## Metadata: high-signal keys only
+## Metadata: high-signal non-protocol keys only
 
 Metadata is durable issue state. Reading metadata is safe. Writing a metadata key
 is a state mutation and should be tied to an explicit task requirement to record
 that state for later readers or runs.
+
+Never manually set reserved `run.*` keys. The agent-run endpoint owns them.
 
 High-signal keys (reuse these names so queries stay consistent):
 
@@ -188,7 +231,8 @@ multica issue create --title "Step 3" --parent <issue-id> --assignee <agent> --s
 ## References
 
 `references/working-on-issues-source-map.md` — accurate `file:line` for every
-contract above: the `pull-requests` CLI and route, the PR response field list,
-`derivePRState`, the two-path link (`extractIdentifiers`) vs close-intent
-(`extractClosingIdentifiers`) proof, the backlog enqueue lines, child-done
-notify, and the metadata CLI. Re-derive before depending on an exact line.
+contract above: the agent-run CLI, validator and routes; the `pull-requests` CLI
+and route; the PR response field list; `derivePRState`; the two-path link
+(`extractIdentifiers`) vs close-intent (`extractClosingIdentifiers`) proof; the
+backlog enqueue lines; child-done notify; and metadata CLI. Re-derive before
+depending on an exact line.

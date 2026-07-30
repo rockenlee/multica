@@ -977,12 +977,16 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// request, so an agent legitimately commenting on a different issue must
 	// not be blocked by its current task's trigger. Assignment-triggered
 	// tasks (no TriggerCommentID) are also unaffected.
+	var sourceTaskID pgtype.UUID
 	if authorType == "agent" {
 		if taskIDHeader := r.Header.Get("X-Task-ID"); taskIDHeader != "" {
 			taskUUID, parseErr := util.ParseUUID(taskIDHeader)
 			if parseErr == nil {
 				task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
 				if err == nil && task.IssueID.Valid && uuidToString(task.IssueID) == uuidToString(issue.ID) {
+					if uuidToString(task.AgentID) == authorID {
+						sourceTaskID = taskUUID
+					}
 					if task.TriggerCommentID.Valid {
 						if uuidToString(parentID) != uuidToString(task.TriggerCommentID) {
 							writeError(w, http.StatusConflict,
@@ -1027,13 +1031,14 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	comment, err := h.Queries.CreateComment(r.Context(), db.CreateCommentParams{
-		IssueID:     issue.ID,
-		WorkspaceID: issue.WorkspaceID,
-		AuthorType:  authorType,
-		AuthorID:    parseUUID(authorID),
-		Content:     req.Content,
-		Type:        req.Type,
-		ParentID:    parentID,
+		IssueID:      issue.ID,
+		WorkspaceID:  issue.WorkspaceID,
+		AuthorType:   authorType,
+		AuthorID:     parseUUID(authorID),
+		Content:      req.Content,
+		Type:         req.Type,
+		ParentID:     parentID,
+		SourceTaskID: sourceTaskID,
 	})
 	if err != nil {
 		slog.Warn("create comment failed", append(logger.RequestAttrs(r), "error", err, "issue_id", issueID)...)
@@ -1102,7 +1107,7 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 	}
 	triggers := h.computeCommentAgentTriggers(ctx, issue, comment.Content, parentComment, actorType, actorID, commentTriggerComputeOptions{})
 	triggers = filterSuppressedCommentAgentTriggers(triggers, suppressAgentIDs)
-	h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers)
+	h.enqueueCommentAgentTriggersWithSource(ctx, issue, comment.ID, comment.SourceTaskID, triggers)
 }
 
 func filterSuppressedCommentAgentTriggers(triggers []commentAgentTrigger, suppressAgentIDs []pgtype.UUID) []commentAgentTrigger {
@@ -1129,11 +1134,22 @@ func filterSuppressedCommentAgentTriggers(triggers []commentAgentTrigger, suppre
 }
 
 func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, triggers []commentAgentTrigger) {
+	h.enqueueCommentAgentTriggersWithSource(ctx, issue, triggerCommentID, pgtype.UUID{}, triggers)
+}
+
+func (h *Handler) enqueueCommentAgentTriggersWithSource(ctx context.Context, issue db.Issue, triggerCommentID, sourceTaskID pgtype.UUID, triggers []commentAgentTrigger) {
 	for _, trigger := range triggers {
+		idempotencyKey := commentCallbackIdempotencyKey(sourceTaskID, trigger.Agent.ID)
 		switch trigger.Source {
 		case commentTriggerSourceIssueAssignee:
 			if trigger.Squad != nil {
-				if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, triggerCommentID); err != nil {
+				var err error
+				if idempotencyKey == "" {
+					_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, triggerCommentID)
+				} else {
+					_, err = h.TaskService.EnqueueTaskForSquadLeaderIdempotent(ctx, issue, trigger.Agent.ID, triggerCommentID, idempotencyKey)
+				}
+				if err != nil {
 					slog.Warn("enqueue squad leader task failed",
 						"issue_id", uuidToString(issue.ID),
 						"squad_id", uuidToString(trigger.Squad.ID),
@@ -1142,18 +1158,36 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 				}
 				continue
 			}
-			if _, err := h.TaskService.EnqueueTaskForIssue(ctx, issue, triggerCommentID); err != nil {
+			var err error
+			if idempotencyKey == "" {
+				_, err = h.TaskService.EnqueueTaskForIssue(ctx, issue, triggerCommentID)
+			} else {
+				_, err = h.TaskService.EnqueueTaskForIssueIdempotent(ctx, issue, triggerCommentID, idempotencyKey)
+			}
+			if err != nil {
 				slog.Warn("enqueue agent task on comment failed", "issue_id", uuidToString(issue.ID), "error", err)
 			}
 		case commentTriggerSourceMentionSquadLeader:
-			if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, triggerCommentID); err != nil {
+			var err error
+			if idempotencyKey == "" {
+				_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, triggerCommentID)
+			} else {
+				_, err = h.TaskService.EnqueueTaskForSquadLeaderIdempotent(ctx, issue, trigger.Agent.ID, triggerCommentID, idempotencyKey)
+			}
+			if err != nil {
 				slog.Warn("enqueue squad leader mention task failed",
 					"issue_id", uuidToString(issue.ID),
 					"agent_id", uuidToString(trigger.Agent.ID),
 					"error", err)
 			}
 		case commentTriggerSourceMentionAgent:
-			if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID); err != nil {
+			var err error
+			if idempotencyKey == "" {
+				_, err = h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID)
+			} else {
+				_, err = h.TaskService.EnqueueTaskForMentionIdempotent(ctx, issue, trigger.Agent.ID, triggerCommentID, idempotencyKey)
+			}
+			if err != nil {
 				slog.Warn("enqueue mention agent task failed",
 					"issue_id", uuidToString(issue.ID),
 					"agent_id", uuidToString(trigger.Agent.ID),
@@ -1161,6 +1195,13 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 			}
 		}
 	}
+}
+
+func commentCallbackIdempotencyKey(sourceTaskID, targetAgentID pgtype.UUID) string {
+	if !sourceTaskID.Valid || !targetAgentID.Valid {
+		return ""
+	}
+	return "comment-callback:" + uuidToString(sourceTaskID) + ":" + uuidToString(targetAgentID)
 }
 
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
@@ -1223,7 +1264,11 @@ func (h *Handler) computeAssignedSquadLeaderCommentTrigger(ctx context.Context, 
 		ID:          squad.LeaderID,
 		WorkspaceID: issue.WorkspaceID,
 	})
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+	if err != nil {
+		return commentAgentTrigger{}, false
+	}
+	ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+	if err != nil || !ready {
 		return commentAgentTrigger{}, false
 	}
 	if !h.canAccessPrivateAgent(ctx, agent, authorType, authorID, uuidToString(issue.WorkspaceID)) {
@@ -1426,7 +1471,11 @@ func (h *Handler) computeMentionedAgentCommentTriggers(ctx context.Context, issu
 				ID:          leaderID,
 				WorkspaceID: issue.WorkspaceID,
 			})
-			if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+			if err != nil {
+				continue
+			}
+			ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+			if err != nil || !ready {
 				continue
 			}
 			// Private-agent gate: prevent triggering a private leader via squad mention.
@@ -1455,7 +1504,11 @@ func (h *Handler) computeMentionedAgentCommentTriggers(ctx context.Context, issu
 			ID:          agentUUID,
 			WorkspaceID: issue.WorkspaceID,
 		})
-		if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+		if err != nil {
+			continue
+		}
+		ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+		if err != nil || !ready {
 			continue
 		}
 		// Private-agent gate (member→private requires allowed_principals;

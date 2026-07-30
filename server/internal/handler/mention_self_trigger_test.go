@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -249,5 +250,80 @@ func TestEnqueueMentionedAgentTasks_SelfMentionDedupesAgainstPendingTask(t *test
 				t.Fatalf("after self-mention with pre-existing %s task: expected dedupe (still 1), got %d", tc.status, after)
 			}
 		})
+	}
+}
+
+func TestCommentCallbackIdempotencySurvivesFirstCallbackCompletion(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	fx := newSelfMentionFixture(t)
+
+	var sourceTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status)
+		VALUES ($1, $2, $3, 'running')
+		RETURNING id
+	`, fx.JID, fx.RuntimeID, fx.IssueBID).Scan(&sourceTaskID); err != nil {
+		t.Fatalf("seed source task: %v", err)
+	}
+
+	trigger := commentAgentTrigger{
+		Agent:  db.Agent{ID: util.MustParseUUID(fx.JID)},
+		Source: commentTriggerSourceMentionAgent,
+	}
+	firstCommentID := util.MustParseUUID(fx.CommentBID)
+	sourceID := util.MustParseUUID(sourceTaskID)
+	testHandler.enqueueCommentAgentTriggersWithSource(ctx, fx.IssueB, firstCommentID, sourceID, []commentAgentTrigger{trigger})
+
+	key := commentCallbackIdempotencyKey(sourceID, trigger.Agent.ID)
+	var firstTaskID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent_task_queue WHERE idempotency_key=$1
+	`, key).Scan(&firstTaskID); err != nil {
+		t.Fatalf("load first callback task: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE agent_task_queue SET status='completed', completed_at=now() WHERE id=$1
+	`, firstTaskID); err != nil {
+		t.Fatalf("complete first callback task: %v", err)
+	}
+
+	var secondCommentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO comment (workspace_id, issue_id, author_type, author_id, content, source_task_id)
+		VALUES ($1, $2, 'agent', $3, 'second callback', $4)
+		RETURNING id
+	`, testWorkspaceID, fx.IssueBID, fx.JID, sourceTaskID).Scan(&secondCommentID); err != nil {
+		t.Fatalf("create second callback comment: %v", err)
+	}
+	testHandler.enqueueCommentAgentTriggersWithSource(
+		ctx,
+		fx.IssueB,
+		util.MustParseUUID(secondCommentID),
+		sourceID,
+		[]commentAgentTrigger{trigger},
+	)
+
+	var count int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue WHERE idempotency_key=$1
+	`, key).Scan(&count); err != nil {
+		t.Fatalf("count callback tasks: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("callback task count = %d, want 1", count)
+	}
+}
+
+func TestCommentCallbackIdempotencyKeyRequiresBothIdentities(t *testing.T) {
+	source := util.MustParseUUID("11111111-1111-1111-1111-111111111111")
+	target := util.MustParseUUID("22222222-2222-2222-2222-222222222222")
+	if got := commentCallbackIdempotencyKey(source, target); got != "comment-callback:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("unexpected key %q", got)
+	}
+	if got := commentCallbackIdempotencyKey(pgtype.UUID{}, target); got != "" {
+		t.Fatalf("missing source must disable idempotency, got %q", got)
 	}
 }
