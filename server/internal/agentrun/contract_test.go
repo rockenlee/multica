@@ -375,6 +375,25 @@ func TestValidateTransitionRejectsPassedStepReopen(t *testing.T) {
 	requireViolation(t, ValidateTransition(previous, next), "invalid_step_status_transition")
 }
 
+func TestValidateTransitionAllowsPlannedStepToStartAtomically(t *testing.T) {
+	previous := validContract()
+	previous.Status = "running"
+	previous.Review.Cycle = 0
+	previous.Review.Verdict = ""
+	previous.Steps[1].Status = "planned"
+	previous.Steps[1].Evidence = nil
+
+	next := cloneContract(t, previous)
+	next.Status = "in_review"
+	next.Review.Cycle = 1
+	next.Steps[1].Status = "running"
+	next.ActiveWorkers = []string{"turing"}
+
+	if err := ValidateTransition(previous, next); err != nil {
+		t.Fatalf("planned step should start atomically once dependencies pass: %v", err)
+	}
+}
+
 func TestValidateTransitionRejectsExistingStepRemoval(t *testing.T) {
 	previous := validContract()
 	next := cloneContract(t, previous)

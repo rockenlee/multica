@@ -318,7 +318,10 @@ func allowedStepTransition(previous, next string) bool {
 	}
 	switch previous {
 	case "planned":
-		return next == "ready" || next == "blocked" || next == "cancelled"
+		// agent-run/v1 treats ready as an observable scheduling state, not a
+		// mandatory hop. A dispatch authority may atomically start a planned
+		// step once dependency and active-worker validation succeeds.
+		return next == "ready" || next == "running" || next == "blocked" || next == "cancelled"
 	case "ready":
 		return next == "running" || next == "blocked" || next == "cancelled"
 	case "running":
