@@ -20,6 +20,16 @@ type Backend interface {
 	Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error)
 }
 
+// CodexThreadMode controls whether a Codex app-server thread is persisted into
+// the user's Codex thread list or kept ephemeral for one-shot daemon work. It is
+// consumed only by the codex backend; other backends ignore it.
+type CodexThreadMode string
+
+const (
+	CodexThreadModeVisible   CodexThreadMode = "visible"
+	CodexThreadModeEphemeral CodexThreadMode = "ephemeral"
+)
+
 // ExecOptions configures a single execution.
 type ExecOptions struct {
 	Cwd   string
@@ -57,6 +67,10 @@ type ExecOptions struct {
 	// ignore this field, mirroring ThinkingLevel's renderer-side fall-through
 	// pattern. See issue #3260.
 	OpenclawMode string
+	// CodexThreadMode selects persisted visible Codex app-server threads versus
+	// ephemeral one-shot threads. Empty keeps the codex backend's historical
+	// visible behaviour; the daemon passes an explicit value for new tasks.
+	CodexThreadMode CodexThreadMode
 }
 
 // runContext derives the execution context for an agent subprocess from the

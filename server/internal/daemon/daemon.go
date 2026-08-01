@@ -155,8 +155,8 @@ type Daemon struct {
 	// command resolves; read by runTask via customCommandPathForRuntime to
 	// launch the custom command for a claimed task. Guarded by mu.
 	profileCommandPaths map[string]string
-	reloading    sync.Mutex         // prevents concurrent workspace syncs
-	runtimeSet   *runtimeSetWatcher // multi-subscriber pub/sub for runtime-set changes
+	reloading           sync.Mutex         // prevents concurrent workspace syncs
+	runtimeSet          *runtimeSetWatcher // multi-subscriber pub/sub for runtime-set changes
 
 	versionsMu    sync.RWMutex      // guards agentVersions
 	agentVersions map[string]string // provider -> detected CLI version (set during registration)
@@ -3493,6 +3493,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			thinkingLevel = ""
 		}
 	}
+	var codexThreadMode agent.CodexThreadMode
+	if provider == "codex" {
+		codexThreadMode = deriveCodexThreadMode(task)
+	}
 	execOpts := agent.ExecOptions{
 		Cwd:                       env.WorkDir,
 		Model:                     model,
@@ -3505,6 +3509,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		McpConfig:                 mcpConfig,
 		ThinkingLevel:             thinkingLevel,
 		OpenclawMode:              openclawMode,
+		CodexThreadMode:           codexThreadMode,
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
@@ -3540,6 +3545,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		"mcp_config", len(mcpConfig) > 0,
 		"inline_system_prompt", execOpts.SystemPrompt != "",
 		"resume_session", execOpts.ResumeSessionID != "",
+		"codex_thread_mode", execOpts.CodexThreadMode,
 		"timeout", execOpts.Timeout,
 	)
 

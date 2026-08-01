@@ -1,6 +1,10 @@
 package daemon
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
+)
 
 const codexThreadNameMaxRunes = 120
 
@@ -18,6 +22,13 @@ func deriveTaskThreadName(task Task) string {
 		}
 	}
 	return ""
+}
+
+func deriveCodexThreadMode(task Task) agent.CodexThreadMode {
+	if task.IssueID != "" || task.ChatSessionID != "" || task.AutopilotRunID != "" || task.PriorSessionID != "" {
+		return agent.CodexThreadModeVisible
+	}
+	return agent.CodexThreadModeEphemeral
 }
 
 func normalizeThreadName(s string, maxRunes int) string {

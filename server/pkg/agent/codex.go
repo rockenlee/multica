@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -620,16 +621,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-			c.handleLine(line)
-		}
-		if err := scanner.Err(); err != nil {
+		if err := readCodexOutputLines(stdout, c.handleLine); err != nil {
 			c.markProcessExited(fmt.Errorf("%w: %v", errCodexProcessExited, err))
 			return
 		}
@@ -651,10 +643,40 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			_ = cmd.Wait()
 		})
 	}
+	shutdownAndWait := func(grace time.Duration) {
+		stdin.Close()
+		if grace > 0 {
+			timer := time.NewTimer(grace)
+			select {
+			case <-readerDone:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				drainAndWait()
+				return
+			case <-timer.C:
+				b.cfg.Logger.Warn("codex did not exit after stdin close; forcing shutdown",
+					"pid", cmd.Process.Pid,
+					"grace", grace.String(),
+				)
+			}
+		}
+
+		// A reader failure can close readerDone while the process is still
+		// blocked writing the remainder of a large response. Cancel before
+		// Wait so CommandContext terminates the child and WaitDelay can bound
+		// any pipe-copy cleanup.
+		cancel()
+		<-readerDone
+		drainAndWait()
+	}
 
 	// Drive the session lifecycle in a goroutine.
 	// Shutdown sequence: lifecycle goroutine closes stdin + cancels context →
-	// codex process exits → reader goroutine's scanner.Scan() returns false →
+	// codex process exits → reader goroutine reaches EOF →
 	// readerDone closes → lifecycle goroutine collects final output and sends Result.
 	go func() {
 		defer cancel()
@@ -678,7 +700,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			},
 		})
 		if err != nil {
-			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
+			shutdownAndWait(0) // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
 			finalError = withAgentStderr(fmt.Sprintf("codex initialize failed: %v", err), "codex", stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
@@ -691,7 +713,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// back to a fresh thread so the task still makes progress.
 		threadID, resumed, err := c.startOrResumeThread(runCtx, opts, b.cfg.Logger)
 		if err != nil {
-			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
+			shutdownAndWait(0) // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
 			finalError = withAgentStderr(err.Error(), "codex", stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
@@ -701,7 +723,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		if resumed {
 			b.cfg.Logger.Info("codex thread resumed", "thread_id", threadID)
 		} else {
-			b.cfg.Logger.Info("codex thread started", "thread_id", threadID)
+			b.cfg.Logger.Info("codex thread started", "thread_id", threadID, "thread_mode", normalizeCodexThreadMode(opts.CodexThreadMode))
 		}
 
 		// 3. Send turn and wait for completion
@@ -719,7 +741,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		applyCodexReasoningEffort(turnParams, opts.ThinkingLevel)
 		_, err = c.request(runCtx, "turn/start", turnParams)
 		if err != nil {
-			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
+			shutdownAndWait(0) // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
 			finalError = withAgentStderr(fmt.Sprintf("codex turn/start failed: %v", err), "codex", stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
@@ -858,20 +880,14 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// force-flushes its OTEL batch exporters — killing it immediately (via
 		// cancel → SIGKILL) drops the task's buffered telemetry. Give it a
 		// bounded grace period; only force-cancel if it doesn't exit, so the
-		// reader goroutine can never block forever on scanner.Scan().
-		stdin.Close()
-		select {
-		case <-readerDone:
-			// codex closed stdout on its own — clean shutdown, telemetry flushed.
-		case <-time.After(codexGracefulShutdownTimeout):
-			b.cfg.Logger.Warn("codex did not exit after stdin close; forcing shutdown",
-				"pid", cmd.Process.Pid,
-				"grace", codexGracefulShutdownTimeout.String(),
-			)
-			cancel()
-			<-readerDone
+		// reader goroutine can never block forever waiting for stdout.
+		shutdownGrace := codexGracefulShutdownTimeout
+		if processExitErr != nil {
+			// readerDone does not prove the child exited: a read failure can
+			// leave app-server blocked on a full stdout pipe.
+			shutdownGrace = 0
 		}
-		drainAndWait()
+		shutdownAndWait(shutdownGrace)
 
 		if processExitErr != nil {
 			finalError = withAgentStderr(processExitErr.Error(), "codex", stderrBuf.Tail())
@@ -911,11 +927,15 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			usageMap = map[string]TokenUsage{model: u}
 		}
 
+		sessionID := threadID
+		if normalizeCodexThreadMode(opts.CodexThreadMode) == CodexThreadModeEphemeral {
+			sessionID = ""
+		}
 		resCh <- Result{
 			Status:     finalStatus,
 			Output:     finalOutput,
 			Error:      finalError,
-			SessionID:  threadID,
+			SessionID:  sessionID,
 			DurationMs: duration.Milliseconds(),
 			Usage:      usageMap,
 		}
@@ -924,16 +944,19 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
-// startOrResumeThread picks between Codex's thread/resume and thread/start
-// based on opts.ResumeSessionID. When a prior thread ID is provided it first
-// tries thread/resume; recoverable protocol errors (unknown thread, schema
-// mismatch) fall back to thread/start so the task still executes, while
-// transport/process failures fail fast because the app-server can no longer
-// answer a fresh start request. The returned threadID is what subsequent
-// turn/start calls must reference, and resumed indicates whether the prior
-// thread was picked up (only useful for logging).
+// startOrResumeThread picks between Codex's thread/resume and thread/start.
+// Visible threads may resume opts.ResumeSessionID; ephemeral threads always
+// start fresh because Codex does not persist them for later turns. Resume asks
+// app-server to omit reconstructed turns because Multica only needs the thread
+// ID and live state. Older app-server versions may reject excludeTurns, so a
+// protocol error gets one legacy resume attempt before falling back to
+// thread/start. Transport/process failures fail fast because that app-server
+// can no longer answer a fresh start request; the daemon retries with a new
+// process. The returned threadID is what subsequent turn/start calls must
+// reference, and resumed indicates whether the prior thread was picked up.
 func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
-	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" {
+	threadMode := normalizeCodexThreadMode(opts.CodexThreadMode)
+	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" && threadMode != CodexThreadModeEphemeral {
 		// thread/resume reuses the thread's persisted model and reasoning
 		// effort; only override fields the daemon actually cares about.
 		resumeParams := map[string]any{
@@ -941,6 +964,7 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 			"cwd":                   opts.Cwd,
 			"model":                 nilIfEmpty(opts.Model),
 			"developerInstructions": nilIfEmpty(opts.SystemPrompt),
+			"excludeTurns":          true,
 		}
 		// Explicit override of the persisted reasoning effort: without
 		// this, a Codex resume silently reuses whatever level the prior
@@ -949,6 +973,14 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		// resume must honour the live config, not the stored one.
 		applyCodexReasoningEffort(resumeParams, opts.ThinkingLevel)
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
+		if err != nil && !isCodexTransportError(err) {
+			logger.Warn("codex thread/resume with excludeTurns failed; retrying legacy resume",
+				"prior_thread_id", priorThreadID,
+				"error", err,
+			)
+			delete(resumeParams, "excludeTurns")
+			resumeResult, err = c.request(ctx, "thread/resume", resumeParams)
+		}
 		if err == nil {
 			if threadID := extractThreadID(resumeResult); threadID != "" {
 				return threadID, true, nil
@@ -956,10 +988,10 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
 		} else {
 			if isCodexTransportError(err) {
-				logger.Warn("codex thread/resume failed due to transport error; not falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
+				logger.Warn("codex thread/resume failed due to transport error; not falling back within the failed app-server process", "prior_thread_id", priorThreadID, "error", err)
 				return "", false, fmt.Errorf("codex thread/resume failed: %w", err)
 			}
-			logger.Warn("codex thread/resume failed; falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
+			logger.Warn("codex legacy thread/resume failed; falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
 		}
 	}
 
@@ -976,7 +1008,8 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"compactPrompt":          nil,
 		"includeApplyPatchTool":  nil,
 		"experimentalRawEvents":  false,
-		"persistExtendedHistory": true,
+		"persistExtendedHistory": threadMode == CodexThreadModeVisible,
+		"ephemeral":              threadMode == CodexThreadModeEphemeral,
 	}
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
 	startResult, err := c.request(ctx, "thread/start", startParams)
@@ -987,8 +1020,35 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 	if threadID == "" {
 		return "", false, fmt.Errorf("codex thread/start returned no thread ID")
 	}
-	c.trySetThreadName(ctx, threadID, opts.ThreadName, logger)
+	if threadMode == CodexThreadModeVisible {
+		c.trySetThreadName(ctx, threadID, opts.ThreadName, logger)
+	}
 	return threadID, false, nil
+}
+
+func readCodexOutputLines(r io.Reader, handleLine func(string)) error {
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if line = strings.TrimSpace(line); line != "" {
+			handleLine(line)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func normalizeCodexThreadMode(mode CodexThreadMode) CodexThreadMode {
+	switch mode {
+	case CodexThreadModeVisible, CodexThreadModeEphemeral:
+		return mode
+	default:
+		return CodexThreadModeVisible
+	}
 }
 
 func (c *codexClient) trySetThreadName(ctx context.Context, threadID, name string, logger *slog.Logger) {
