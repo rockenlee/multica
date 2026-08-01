@@ -434,7 +434,14 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 	if len(triggerCommentID) > 0 {
 		commentID = triggerCommentID[0]
 	}
-	return s.enqueueIssueTask(ctx, issue, commentID, false)
+	return s.enqueueIssueTask(ctx, issue, commentID, false, "")
+}
+
+// EnqueueTaskForIssueIdempotent is the comment-callback variant. Repeating
+// the same key returns the original task without re-publishing or waking the
+// runtime.
+func (s *TaskService) EnqueueTaskForIssueIdempotent(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, idempotencyKey string) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTask(ctx, issue, triggerCommentID, false, idempotencyKey)
 }
 
 // enqueueIssueTask is the shared implementation behind EnqueueTaskForIssue
@@ -442,7 +449,7 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 // daemon claim handler skips the (agent_id, issue_id) resume lookup — the
 // user already judged the prior output bad, a fresh agent session is the
 // expected behavior.
-func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error) {
+func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, idempotencyKey string) (db.AgentTaskQueue, error) {
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
 		return db.AgentTaskQueue{}, fmt.Errorf("issue has no assignee")
@@ -453,16 +460,26 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
 	}
-	if agent.ArchivedAt.Valid {
-		slog.Debug("task enqueue skipped: agent is archived", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agent.ID))
-		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	ready, reason, err := AgentReadiness(ctx, s.Queries, agent)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("check agent readiness: %w", err)
 	}
-	if !agent.RuntimeID.Valid {
-		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "agent has no runtime")
-		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	if !ready {
+		slog.Debug("task enqueue skipped: agent unavailable",
+			"issue_id", util.UUIDToString(issue.ID),
+			"agent_id", util.UUIDToString(agent.ID),
+			"reason", reason)
+		return db.AgentTaskQueue{}, errors.New(reason)
+	}
+	allowed, reason, err := AgentRunTaskAdmission(ctx, s.Queries, issue.ID, issue.WorkspaceID, agent.ID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("check agent run admission: %w", err)
+	}
+	if !allowed {
+		return db.AgentTaskQueue{}, errors.New(reason)
 	}
 
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+	task, inserted, err := s.createAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:           issue.AssigneeID,
 		RuntimeID:         agent.RuntimeID,
 		IssueID:           issue.ID,
@@ -470,10 +487,17 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 		TriggerCommentID:  triggerCommentID,
 		TriggerSummary:    s.buildCommentTriggerSummary(ctx, triggerCommentID),
 		ForceFreshSession: pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
-	})
+	}, idempotencyKey)
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
+	}
+	if !inserted {
+		slog.Info("task enqueue deduplicated",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(issue.ID),
+			"agent_id", util.UUIDToString(issue.AssigneeID))
+		return task, nil
 	}
 
 	slog.Info("task enqueued",
@@ -497,7 +521,11 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 // Unlike EnqueueTaskForIssue, this takes an explicit agent ID rather than
 // deriving it from the issue assignee.
 func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, false)
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, false, "")
+}
+
+func (s *TaskService) EnqueueTaskForMentionIdempotent(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, idempotencyKey string) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, false, idempotencyKey)
 }
 
 // EnqueueTaskForSquadLeader is the leader-role variant of EnqueueTaskForMention.
@@ -507,25 +535,39 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 // as a worker (do not skip). This matters for agents that are simultaneously
 // the leader and a worker of the same squad — see migration 090.
 func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, false)
+	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, false, "")
 }
 
-func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, forceFreshSession bool) (db.AgentTaskQueue, error) {
+func (s *TaskService) EnqueueTaskForSquadLeaderIdempotent(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, triggerCommentID pgtype.UUID, idempotencyKey string) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, false, idempotencyKey)
+}
+
+func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, forceFreshSession bool, idempotencyKey string) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
 	}
-	if agent.ArchivedAt.Valid {
-		slog.Debug("mention task enqueue skipped: agent is archived", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
-		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	ready, reason, err := AgentReadiness(ctx, s.Queries, agent)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("check agent readiness: %w", err)
 	}
-	if !agent.RuntimeID.Valid {
-		slog.Error("mention task enqueue failed: agent has no runtime", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
-		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	if !ready {
+		slog.Debug("mention task enqueue skipped: agent unavailable",
+			"issue_id", util.UUIDToString(issue.ID),
+			"agent_id", util.UUIDToString(agentID),
+			"reason", reason)
+		return db.AgentTaskQueue{}, errors.New(reason)
+	}
+	allowed, reason, err := AgentRunTaskAdmission(ctx, s.Queries, issue.ID, issue.WorkspaceID, agent.ID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("check agent run admission: %w", err)
+	}
+	if !allowed {
+		return db.AgentTaskQueue{}, errors.New(reason)
 	}
 
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+	task, inserted, err := s.createAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:           agentID,
 		RuntimeID:         agent.RuntimeID,
 		IssueID:           issue.ID,
@@ -534,10 +576,17 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 		TriggerSummary:    s.buildCommentTriggerSummary(ctx, triggerCommentID),
 		IsLeaderTask:      pgtype.Bool{Bool: isLeader, Valid: isLeader},
 		ForceFreshSession: pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
-	})
+	}, idempotencyKey)
 	if err != nil {
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
+	}
+	if !inserted {
+		slog.Info("mention task enqueue deduplicated",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(issue.ID),
+			"agent_id", util.UUIDToString(agentID))
+		return task, nil
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
@@ -545,6 +594,29 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.NotifyTaskEnqueued(ctx, task)
 	return task, nil
+}
+
+func (s *TaskService) createAgentTask(ctx context.Context, params db.CreateAgentTaskParams, idempotencyKey string) (db.AgentTaskQueue, bool, error) {
+	if idempotencyKey == "" {
+		task, err := s.Queries.CreateAgentTask(ctx, params)
+		return task, true, err
+	}
+	created, err := s.Queries.CreateIdempotentAgentTask(ctx, db.CreateIdempotentAgentTaskParams{
+		AgentID:           params.AgentID,
+		RuntimeID:         params.RuntimeID,
+		IssueID:           params.IssueID,
+		Priority:          params.Priority,
+		TriggerCommentID:  params.TriggerCommentID,
+		TriggerSummary:    params.TriggerSummary,
+		ForceFreshSession: params.ForceFreshSession,
+		IsLeaderTask:      params.IsLeaderTask,
+		IdempotencyKey:    pgtype.Text{String: idempotencyKey, Valid: true},
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, false, err
+	}
+	task, err := s.Queries.GetAgentTask(ctx, created.ID)
+	return task, created.Inserted, err
 }
 
 // QuickCreateContext is the JSON payload stored on a quick-create task's
@@ -607,11 +679,12 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
 	}
-	if agent.ArchivedAt.Valid {
-		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	ready, reason, err := AgentReadiness(ctx, s.Queries, agent)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("check agent readiness: %w", err)
 	}
-	if !agent.RuntimeID.Valid {
-		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	if !ready {
+		return db.AgentTaskQueue{}, errors.New(reason)
 	}
 
 	payload := QuickCreateContext{
@@ -1702,9 +1775,9 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool) (db.AgentTaskQueue, error) {
 	if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
 		util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
-		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true)
+		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true, "")
 	}
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, isLeader, true)
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, isLeader, true, "")
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of

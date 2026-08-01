@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubLookPath swaps the package-level lookPath indirection used by
@@ -144,6 +145,71 @@ func newProfileRegisterFixture(t *testing.T, profiles []RuntimeProfile, profiles
 	fx.daemon = d
 	fx.server = srv
 	return fx
+}
+
+func TestRegisterRuntimes_VersionProbeTimeoutIsPerRuntime(t *testing.T) {
+	origDetect := detectAgentVersion
+	origCheck := checkAgentMinVersion
+	t.Cleanup(func() {
+		detectAgentVersion = origDetect
+		checkAgentMinVersion = origCheck
+	})
+
+	detectAgentVersion = func(ctx context.Context, path string) (string, error) {
+		switch path {
+		case "/test/hung-agent":
+			<-ctx.Done()
+			return "", ctx.Err()
+		case "/test/hung-profile":
+			<-ctx.Done()
+			return "", ctx.Err()
+		case "/test/healthy-agent":
+			return "9.9.9", nil
+		default:
+			return "", errors.New("unexpected agent path")
+		}
+	}
+	checkAgentMinVersion = func(_, _ string) error { return nil }
+	stubLookPath(t, map[string]string{"hung-profile": "/test/hung-profile"})
+
+	fx := newProfileRegisterFixture(t, []RuntimeProfile{{
+		ID:             "prof-timeout",
+		WorkspaceID:    "ws-1",
+		DisplayName:    "Slow Custom Runtime",
+		ProtocolFamily: "codex",
+		CommandName:    "hung-profile",
+		Enabled:        true,
+	}}, http.StatusOK)
+	d := fx.daemon
+	d.versionProbeTimeout = 25 * time.Millisecond
+	d.cfg.Agents = map[string]AgentEntry{
+		"openclaw": {Path: "/test/hung-agent"},
+		"codex":    {Path: "/test/healthy-agent"},
+	}
+
+	startedAt := time.Now()
+	resp, _, err := d.registerRuntimesForWorkspace(context.Background(), "ws-1")
+	if err != nil {
+		t.Fatalf("registerRuntimesForWorkspace: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second {
+		t.Fatalf("registration took %s, want less than 1s", elapsed.Round(time.Millisecond))
+	}
+	if len(resp.Runtimes) != 2 {
+		t.Fatalf("registered runtimes = %+v, want healthy codex plus custom profile", resp.Runtimes)
+	}
+	var foundBuiltIn, foundCustom bool
+	for _, runtime := range fx.sentRuntimes {
+		switch runtime["profile_id"] {
+		case "prof-timeout":
+			foundCustom = runtime["type"] == "codex" && runtime["version"] == ""
+		case nil, "":
+			foundBuiltIn = runtime["type"] == "codex" && runtime["version"] == "9.9.9"
+		}
+	}
+	if !foundBuiltIn || !foundCustom {
+		t.Fatalf("sent runtimes = %+v, want healthy built-in plus timed-out custom profile with empty version", fx.sentRuntimes)
+	}
 }
 
 // TestRegisterRuntimes_AppendsProfileRuntime verifies that a custom profile

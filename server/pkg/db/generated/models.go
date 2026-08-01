@@ -46,6 +46,23 @@ type Agent struct {
 	ThinkingLevel      pgtype.Text        `json:"thinking_level"`
 }
 
+type AgentRun struct {
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	IssueID                pgtype.UUID        `json:"issue_id"`
+	RunID                  string             `json:"run_id"`
+	ProtocolVersion        string             `json:"protocol_version"`
+	ProtocolPackageVersion string             `json:"protocol_package_version"`
+	ProtocolSha256         string             `json:"protocol_sha256"`
+	Status                 string             `json:"status"`
+	DispatchAuthority      string             `json:"dispatch_authority"`
+	Contract               []byte             `json:"contract"`
+	Revision               int32              `json:"revision"`
+	IssueStatusMode        string             `json:"issue_status_mode"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
 type AgentRuntime struct {
 	ID             pgtype.UUID        `json:"id"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
@@ -99,6 +116,7 @@ type AgentTaskQueue struct {
 	IsLeaderTask      bool               `json:"is_leader_task"`
 	WaitReason        pgtype.Text        `json:"wait_reason"`
 	InitiatorUserID   pgtype.UUID        `json:"initiator_user_id"`
+	IdempotencyKey    pgtype.Text        `json:"idempotency_key"`
 }
 
 type Attachment struct {
@@ -388,6 +406,18 @@ type IntegrationIssueSyncSetting struct {
 	OutboundEnabledAt pgtype.Timestamptz `json:"outbound_enabled_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type IntegrationIssueTombstone struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Provider    string             `json:"provider"`
+	SourceID    string             `json:"source_id"`
+	ProjectID   pgtype.UUID        `json:"project_id"`
+	SourceUrl   pgtype.Text        `json:"source_url"`
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	DeletedBy   pgtype.UUID        `json:"deleted_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	SourceScope string             `json:"source_scope"`
 }
 
 type IntegrationProjectBinding struct {

@@ -6,6 +6,31 @@ after the latest `main` merge; the prior skill cited pre-merge lines that have
 since moved (see the "drifted" column). Re-confirm with the verification command
 at the bottom before relying on an exact line.
 
+## Machine-validated `agent-run/v1` control plane
+
+| Behavior | File:line |
+|---|---|
+| CLI command group and create/get/list/update commands | `server/cmd/multica/cmd_issue_agent_run.go:20-52` |
+| CLI strict JSON decode plus local contract validation | `server/cmd/multica/cmd_issue_agent_run.go:81-103` |
+| CLI create/update calls the dedicated API | `server/cmd/multica/cmd_issue_agent_run.go:116-143,175-200` |
+| API routes | `server/cmd/server/router.go:774-777` |
+| API create/get/list/update handlers | `server/internal/handler/agent_run.go:123,234,259,295` |
+| Contract, transition, and cross-run scope validators | `server/internal/agentrun/contract.go:155,183,230` |
+| Active Run task-queue admission gate | `server/internal/service/agent_run_admission.go:18` |
+
+The persisted contract is the write authority. The validator binds the exact
+compiled protocol package identity, rejects empty acceptance/verification,
+requires executor-produced PASS evidence and a real independent reviewer step
+for M/L closure, freezes active step structure, and reconciles active workers
+with running steps. The handler checks the declared dispatch authority against
+the authenticated agent, validates every executor/reviewer as a live agent in
+the same workspace, serializes cross-run scope checks under a workspace
+transaction lock, uses optimistic revision, and synchronizes reserved `run.*`
+metadata plus optional issue status in the same transaction.
+`AgentRunTaskAdmission` then connects the validated contract to real task
+enqueue: an active Run permits only executors with a `running` step and matching
+`active_workers` identity.
+
 ## `multica issue pull-requests` — read PR links from Multica
 
 | Behavior | File:line | Drifted from |
@@ -129,6 +154,11 @@ Re-derive any line above before depending on it:
 ```bash
 cd server
 grep -n 'pull-requests <id>'                 cmd/multica/cmd_issue.go
+grep -n 'var issueAgentRun\|func runIssueAgentRun\|func readAgentRunContract' cmd/multica/cmd_issue_agent_run.go
+grep -n 'agent-runs'                         cmd/server/router.go
+grep -n 'func (h \*Handler) .*AgentRun'      internal/handler/agent_run.go
+grep -n 'func Validate'                      internal/agentrun/contract.go
+grep -n 'func AgentRunTaskAdmission'         internal/service/agent_run_admission.go
 grep -n 'ListPullRequestsForIssue'           cmd/server/router.go internal/handler/github.go
 grep -n 'func issuePullRequestRowToResponse\|type GitHubPullRequestResponse struct\|func derivePRState\|func extractIdentifiers\|func extractClosingIdentifiers\|closingIdentifierRe' internal/handler/github.go
 grep -n 'extractIdentifiers(\|extractClosingIdentifiers(\|derivePRState(' internal/handler/github.go

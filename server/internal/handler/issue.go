@@ -1873,12 +1873,13 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
-	if !agent.RuntimeID.Valid {
-		writeAgentUnavailable(w, "agent has no runtime")
+	ready, reason, err := service.AgentReadiness(r.Context(), h.Queries, agent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check agent runtime readiness")
 		return
 	}
-	if !h.isRuntimeOnline(r.Context(), agent.RuntimeID) {
-		writeAgentUnavailable(w, "agent's runtime is offline")
+	if !ready {
+		writeAgentUnavailable(w, reason)
 		return
 	}
 
@@ -1961,18 +1962,6 @@ func writeAgentUnavailable(w http.ResponseWriter, reason string) {
 		"code":   "agent_unavailable",
 		"reason": reason,
 	})
-}
-
-// isRuntimeOnline returns true when the given runtime is currently
-// reachable (status == "online"). Quick-create rejects submissions whose
-// agent's runtime is offline so the user gets immediate feedback in the
-// modal instead of an inbox failure twenty seconds later.
-func (h *Handler) isRuntimeOnline(ctx context.Context, runtimeID pgtype.UUID) bool {
-	rt, err := h.Queries.GetAgentRuntime(ctx, runtimeID)
-	if err != nil {
-		return false
-	}
-	return rt.Status == "online"
 }
 
 // checkQuickCreateDaemonVersion enforces MinQuickCreateCLIVersion against the
@@ -2714,7 +2703,11 @@ func (h *Handler) shouldEnqueueOnComment(ctx context.Context, issue db.Issue, ac
 		return false
 	}
 	agent, err := h.Queries.GetAgent(ctx, issue.AssigneeID)
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+	if err != nil {
+		return false
+	}
+	ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+	if err != nil || !ready {
 		return false
 	}
 	if !h.canAccessPrivateAgent(ctx, agent, actorType, actorID, uuidToString(issue.WorkspaceID)) {
@@ -2775,11 +2768,11 @@ func (h *Handler) isAgentAssigneeReady(ctx context.Context, issue db.Issue) bool
 	}
 
 	agent, err := h.Queries.GetAgent(ctx, issue.AssigneeID)
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+	if err != nil {
 		return false
 	}
-
-	return true
+	ready, _, err := service.AgentReadiness(ctx, h.Queries, agent)
+	return err == nil && ready
 }
 
 func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
