@@ -1427,27 +1427,27 @@ func (h *Handler) RequestIssueOutboundSync(w http.ResponseWriter, r *http.Reques
 	now := time.Now().UTC().Format(time.RFC3339)
 	updates := map[string]json.RawMessage{
 		"sync_out":               json.RawMessage(`true`),
-		"sync_out_provider":      jsonString(candidate.connection.Provider),
-		"sync_out_connection_id": jsonString(uuidToString(candidate.connection.ID)),
-		"sync_out_status":        jsonString(syncStatus),
-		"sync_out_requested_at":  jsonString(now),
-		"sync_out_event_id":      jsonString(uuidToString(event.ID)),
+		"sync_out_provider":      integrationJSONString(candidate.connection.Provider),
+		"sync_out_connection_id": integrationJSONString(uuidToString(candidate.connection.ID)),
+		"sync_out_status":        integrationJSONString(syncStatus),
+		"sync_out_requested_at":  integrationJSONString(now),
+		"sync_out_event_id":      integrationJSONString(uuidToString(event.ID)),
 	}
 	if sourceType != "" {
-		updates["sync_out_type"] = jsonString(sourceType)
+		updates["sync_out_type"] = integrationJSONString(sourceType)
 	}
 	if extCreated {
-		updates["source_system"] = jsonString(candidate.connection.Provider)
-		updates["source_id"] = jsonString(extSourceID)
-		updates["source_url"] = jsonString(extSourceURL)
-		updates["external_status"] = jsonString("opened")
-		updates["last_synced_at"] = jsonString(now)
+		updates["source_system"] = integrationJSONString(candidate.connection.Provider)
+		updates["source_id"] = integrationJSONString(extSourceID)
+		updates["source_url"] = integrationJSONString(extSourceURL)
+		updates["external_status"] = integrationJSONString("opened")
+		updates["last_synced_at"] = integrationJSONString(now)
 	} else if !notImplemented && strings.TrimSpace(extErr) != "" {
 		errText := extErr
 		if len(errText) > 300 {
 			errText = errText[:300]
 		}
-		updates["sync_out_error"] = jsonString(errText)
+		updates["sync_out_error"] = integrationJSONString(errText)
 	}
 	newMetadataKeys := 0
 	for key := range updates {
@@ -3215,7 +3215,7 @@ func firstNonEmptyStringPtr(ptr *string, rest ...string) string {
 	return ""
 }
 
-func jsonString(value string) json.RawMessage {
+func integrationJSONString(value string) json.RawMessage {
 	out, _ := json.Marshal(value)
 	return out
 }

@@ -10,7 +10,7 @@ import { ViewStoreProvider } from "@multica/core/issues/stores/view-store-contex
 import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
 import enMyIssues from "../../locales/en/my-issues.json";
-import { MyIssuesHeader, MyIssuesSyncSettingsButton } from "./my-issues-header";
+import { MyIssuesHeader } from "./my-issues-header";
 
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
@@ -82,6 +82,8 @@ function makeIssue(id: string, source?: string): Issue {
     position: 0,
     start_date: null,
     due_date: null,
+    stage: null,
+    properties: {},
     metadata: source ? { source_system: source } : {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
@@ -96,13 +98,16 @@ function renderHeader() {
     <I18nProvider locale="en" resources={TEST_RESOURCES}>
       <QueryClientProvider client={qc}>
         <ViewStoreProvider store={myIssuesViewStore}>
-          <MyIssuesSyncSettingsButton />
           <MyIssuesHeader
             allIssues={[
               makeIssue("1", "gitlab"),
               makeIssue("2", "zentao"),
               makeIssue("3", "lark"),
             ]}
+            workingAgents={undefined}
+            scope="all"
+            onScopeChange={vi.fn()}
+            onTableFacetChange={vi.fn()}
           />
         </ViewStoreProvider>
       </QueryClientProvider>

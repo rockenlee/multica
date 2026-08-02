@@ -708,7 +708,7 @@ func (h *Handler) publishAgentRunIssueStatus(r *http.Request, previous db.Issue,
 	if nextStatus == "cancelled" {
 		h.TaskService.CancelTasksForIssue(r.Context(), updated.ID)
 	}
-	h.notifyParentOfChildDone(r.Context(), previous, updated, actorType, actorID)
+	h.notifyParentOfChildDone(r.Context(), previous, updated)
 }
 
 func writeAgentRunValidationError(w http.ResponseWriter, err error) {

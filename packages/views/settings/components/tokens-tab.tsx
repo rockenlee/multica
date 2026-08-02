@@ -1,15 +1,21 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Key, Trash2, Copy, Check } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Trash2, Copy, Check, Info, Key } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
-import type { IntegrationConnection, IntegrationUserAccount, PersonalAccessToken } from "@multica/core/types";
+import type {
+  IntegrationConnection,
+  IntegrationUserAccount,
+  PersonalAccessToken,
+} from "@multica/core/types";
+import { Alert, AlertDescription } from "@multica/ui/components/ui/alert";
+import { Checkbox } from "@multica/ui/components/ui/checkbox";
+import { Label } from "@multica/ui/components/ui/label";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { Input } from "@multica/ui/components/ui/input";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
-import { Label } from "@multica/ui/components/ui/label";
-import { Switch } from "@multica/ui/components/ui/switch";
 import {
   Select,
   SelectTrigger,
@@ -22,7 +28,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
   DialogFooter,
 } from "@multica/ui/components/ui/dialog";
 import {
@@ -39,10 +44,17 @@ import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
-import { integrationsOptions, integrationKeys } from "@multica/core/integrations";
+import {
+  integrationsOptions,
+  integrationKeys,
+} from "@multica/core/integrations";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useT } from "../../i18n";
-import { ConnectionStatusBadge, type ConnectionStatus } from "./connection-status";
+import {
+  ConnectionStatusBadge,
+  type ConnectionStatus,
+} from "./connection-status";
+import { SettingsSection, SettingsTab } from "./settings-layout";
 
 const EXPIRY_KEYS = ["30", "90", "365", "never"] as const;
 const FEISHU_OAUTH_ACCOUNT_KEY = "feishuuseroauth";
@@ -70,14 +82,19 @@ function isFeishuOAuthUserAccount(
   account: IntegrationUserAccount,
 ) {
   if (connection.provider !== "feishu") return false;
-  return normalizeAccountKeyIdentity(account.account_key) === FEISHU_OAUTH_ACCOUNT_KEY;
+  return (
+    normalizeAccountKeyIdentity(account.account_key) ===
+    FEISHU_OAUTH_ACCOUNT_KEY
+  );
 }
 
 function feishuOAuthDedupeKey(
   connection: IntegrationConnection,
   account: IntegrationUserAccount,
 ) {
-  const appIdentity = configString(connection.config, ["app_id", "appId", "client_id", "clientId"]) || connection.id;
+  const appIdentity =
+    configString(connection.config, ["app_id", "appId", "client_id", "clientId"]) ||
+    connection.id;
   const userIdentity =
     normalizeAccountKeyIdentity(account.external_user_id) ||
     normalizeAccountKeyIdentity(account.external_username) ||
@@ -94,7 +111,9 @@ function visibleExternalAccountsByConnection(
 
   for (const connection of connections) {
     const visible: IntegrationUserAccount[] = [];
-    for (const account of accounts.filter((item) => item.connection_id === connection.id)) {
+    for (const account of accounts.filter(
+      (item) => item.connection_id === connection.id,
+    )) {
       if (isFeishuOAuthUserAccount(connection, account)) {
         const key = feishuOAuthDedupeKey(connection, account);
         if (seenFeishuOAuth.has(key)) continue;
@@ -107,24 +126,32 @@ function visibleExternalAccountsByConnection(
 
   return byConnection;
 }
-
 export function TokensTab() {
   const { t } = useT("settings");
+  const expiryItems = EXPIRY_KEYS.map((value) => ({
+    value,
+    label: t(($) => $.tokens.expiry[value]),
+  }));
   const [tokens, setTokens] = useState<PersonalAccessToken[]>([]);
   const [tokenName, setTokenName] = useState("");
   const [tokenExpiry, setTokenExpiry] = useState("90");
   const [tokenCreating, setTokenCreating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [commandCopied, setCommandCopied] = useState(false);
+  const [storedConfirmed, setStoredConfirmed] = useState(false);
   const [tokenRevoking, setTokenRevoking] = useState<string | null>(null);
   const [revokeConfirmId, setRevokeConfirmId] = useState<string | null>(null);
   const [tokensLoading, setTokensLoading] = useState(true);
+  const [tokensLoadFailed, setTokensLoadFailed] = useState(false);
 
   const loadTokens = useCallback(async () => {
     try {
       const list = await api.listPersonalAccessTokens();
       setTokens(list);
+      setTokensLoadFailed(false);
     } catch (e) {
+      setTokensLoadFailed(true);
       toast.error(e instanceof Error ? e.message : t(($) => $.tokens.toast_load_failed));
     } finally {
       setTokensLoading(false);
@@ -170,31 +197,56 @@ export function TokensTab() {
     }
   };
 
-  return (
-    <div className="space-y-8">
-      <section className="space-y-4">
-        <div className="flex items-center gap-2">
-          <Key className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">{t(($) => $.tokens.title)}</h2>
-        </div>
+  const handleCopyCommand = async () => {
+    if (!newToken) return;
+    if (await copyText(`multica login --token ${newToken}`)) {
+      setCommandCopied(true);
+      setTimeout(() => setCommandCopied(false), 2000);
+    }
+  };
 
+  const closeCreatedDialog = () => {
+    setNewToken(null);
+    setTokenCopied(false);
+    setCommandCopied(false);
+    setStoredConfirmed(false);
+  };
+
+  return (
+    <SettingsTab title={t(($) => $.tokens.title)}>
+      <SettingsSection
+        description={
+          <>
+            {t(($) => $.tokens.description)}
+            <br />
+            {t(($) => $.tokens.security_note)}
+          </>
+        }
+      >
         <Card>
           <CardContent className="space-y-3">
-            <p className="text-xs text-muted-foreground">
-              {t(($) => $.tokens.description)}
-            </p>
             <div className="grid gap-3 sm:grid-cols-[1fr_120px_auto]">
               <Input
                 type="text"
+                name="token-name"
+                autoComplete="off"
+                aria-label={t(($) => $.tokens.name_placeholder)}
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
                 placeholder={t(($) => $.tokens.name_placeholder)}
               />
-              <Select value={tokenExpiry} onValueChange={(v) => { if (v) setTokenExpiry(v); }}>
-                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
+              <Select
+                items={expiryItems}
+                value={tokenExpiry}
+                onValueChange={(v) => { if (v) setTokenExpiry(v); }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  aria-label={t(($) => $.tokens.title)}
+                ><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {EXPIRY_KEYS.map((key) => (
-                    <SelectItem key={key} value={key}>{t(($) => $.tokens.expiry[key])}</SelectItem>
+                  {expiryItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -219,14 +271,22 @@ export function TokensTab() {
               </Card>
             ))}
           </div>
-        ) : tokens.length > 0 && (
+        ) : tokens.length === 0 ? (
+          <Card>
+            <CardContent>
+              <p className="text-caption text-muted-foreground">
+                {tokensLoadFailed ? t(($) => $.tokens.load_failed) : t(($) => $.tokens.empty)}
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
           <div className="space-y-2">
             {tokens.map((token) => (
               <Card key={token.id}>
                 <CardContent className="flex items-center gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium truncate">{token.name}</div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="text-body font-medium truncate">{token.name}</div>
+                    <div className="text-caption text-muted-foreground">
                       {t(($) => $.tokens.metadata_prefix, {
                         prefix: token.token_prefix,
                         created: new Date(token.created_at).toLocaleDateString(),
@@ -262,7 +322,7 @@ export function TokensTab() {
             ))}
           </div>
         )}
-      </section>
+      </SettingsSection>
 
       <AlertDialog open={!!revokeConfirmId} onOpenChange={(v) => { if (!v) setRevokeConfirmId(null); }}>
         <AlertDialogContent>
@@ -287,22 +347,32 @@ export function TokensTab() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={!!newToken} onOpenChange={(v) => { if (!v) { setNewToken(null); setTokenCopied(false); } }}>
-        <DialogContent>
+      <Dialog open={!!newToken} onOpenChange={(v) => { if (!v) closeCreatedDialog(); }}>
+        <DialogContent className="sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>{t(($) => $.tokens.created_dialog.title)}</DialogTitle>
-            <DialogDescription>
-              {t(($) => $.tokens.created_dialog.description)}
-            </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 rounded-md border bg-muted/50 px-3 py-2 text-sm break-all select-all">
+          <Alert>
+            <Info />
+            <AlertDescription>
+              {t(($) => $.tokens.created_dialog.warning_prefix)}
+              <span className="font-medium text-foreground">{t(($) => $.tokens.created_dialog.warning_emphasis)}</span>
+              {t(($) => $.tokens.created_dialog.warning_suffix)}
+            </AlertDescription>
+          </Alert>
+          <div className="flex min-w-0 items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-md border bg-muted/50 px-3 py-2 text-body select-all">
               {newToken}
             </code>
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <Button variant="outline" size="icon" onClick={handleCopyToken}>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={handleCopyToken}
+                    aria-label={t(($) => $.tokens.created_dialog.copy_tooltip)}
+                  >
                     {tokenCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                   </Button>
                 }
@@ -310,14 +380,45 @@ export function TokensTab() {
               <TooltipContent>{t(($) => $.tokens.created_dialog.copy_tooltip)}</TooltipContent>
             </Tooltip>
           </div>
-          <DialogFooter>
-            <Button onClick={() => { setNewToken(null); setTokenCopied(false); }}>{t(($) => $.tokens.created_dialog.done)}</Button>
+          <div className="min-w-0 space-y-1.5">
+            <p className="text-caption text-muted-foreground">{t(($) => $.tokens.created_dialog.cli_hint)}</p>
+            <div className="flex min-w-0 items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md border bg-muted/50 px-3 py-2 text-body select-all">
+                {`multica login --token ${newToken}`}
+              </code>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={handleCopyCommand}
+                      aria-label={t(($) => $.tokens.created_dialog.copy_command_tooltip)}
+                    >
+                      {commandCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  }
+                />
+                <TooltipContent>{t(($) => $.tokens.created_dialog.copy_command_tooltip)}</TooltipContent>
+              </Tooltip>
+            </div>
+          </div>
+          <DialogFooter className="items-center sm:justify-between">
+            <label className="flex items-center gap-2 text-body">
+              <Checkbox
+                checked={storedConfirmed}
+                onCheckedChange={(v) => setStoredConfirmed(v === true)}
+              />
+              {t(($) => $.tokens.created_dialog.confirm_stored)}
+            </label>
+            <Button disabled={!storedConfirmed} onClick={closeCreatedDialog}>
+              {t(($) => $.tokens.created_dialog.done)}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
       <ExternalAccountsSection />
-    </div>
+    </SettingsTab>
   );
 }
 
@@ -336,19 +437,19 @@ function ExternalAccountsSection() {
     <section className="space-y-4">
       <div className="flex items-center gap-2">
         <Key className="h-4 w-4 text-muted-foreground" />
-        <h2 className="text-sm font-semibold">
+        <h2 className="text-body font-semibold">
           {t(($) => $.tokens.external_accounts_title)}
         </h2>
       </div>
       <Card>
         <CardContent className="space-y-3">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.tokens.external_accounts_description)}
           </p>
           {isLoading ? (
-            <p className="text-sm text-muted-foreground">{t(($) => $.lark.loading)}</p>
+            <p className="text-body text-muted-foreground">{t(($) => $.lark.loading)}</p>
           ) : connections.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {t(($) => $.tokens.external_accounts_empty)}
             </p>
           ) : (
@@ -530,10 +631,10 @@ function ExternalAccountRow({
     <div className="space-y-3 rounded-md border bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <div className="text-sm font-medium">
+          <div className="text-body font-medium">
             {account?.account_name || t(($) => $.tokens.external_accounts_new_title, { provider: connection.name })}
           </div>
-          <div className="text-xs text-muted-foreground">
+          <div className="text-caption text-muted-foreground">
             {connection.base_url || connection.provider}
           </div>
         </div>
@@ -543,7 +644,7 @@ function ExternalAccountRow({
       </div>
       <div className="grid gap-2 md:grid-cols-2">
         <div className="space-y-1.5">
-          <Label className="text-xs">
+          <Label className="text-caption">
             {t(($) => $.tokens.external_accounts_account_name)}
           </Label>
           <Input
@@ -553,7 +654,7 @@ function ExternalAccountRow({
           />
         </div>
         <div className="space-y-1.5">
-          <Label className="text-xs">
+          <Label className="text-caption">
             {t(($) => $.tokens.external_accounts_username)}
           </Label>
           <Input
@@ -564,7 +665,7 @@ function ExternalAccountRow({
         </div>
         {isZentao ? (
           <div className="space-y-1.5">
-            <Label className="text-xs">
+            <Label className="text-caption">
               {t(($) => $.tokens.external_accounts_zentao_password)}
             </Label>
             <Input
@@ -577,7 +678,7 @@ function ExternalAccountRow({
           </div>
         ) : isFeishu ? null : (
           <div className="space-y-1.5">
-            <Label className="text-xs">
+            <Label className="text-caption">
               {t(($) => $.tokens.external_accounts_token)}
             </Label>
             <Input
@@ -604,7 +705,7 @@ function ExternalAccountRow({
           />
           <Label
             htmlFor={`external-account-${connection.id}`}
-            className="text-xs text-muted-foreground"
+            className="text-caption text-muted-foreground"
           >
             {t(($) => $.tokens.external_accounts_sync)}
           </Label>
@@ -703,12 +804,12 @@ function ExternalAccountRow({
         </AlertDialogContent>
       </AlertDialog>
       {isFeishu && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           {t(($) => $.tokens.external_accounts_feishu_connect_hint)}
         </p>
       )}
       {!credentialStorageEnabled && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           {t(($) => $.tokens.external_accounts_secret_required)}
         </p>
       )}

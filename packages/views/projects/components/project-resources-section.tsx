@@ -37,6 +37,11 @@ import type {
 } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@multica/ui/components/ui/popover";
+import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
@@ -49,6 +54,7 @@ import {
   type ValidateLocalDirectoryResult,
 } from "../../platform";
 import { useT } from "../../i18n";
+import { githubShortLabel } from "../../common/github-url";
 
 // Project Resources sidebar section.
 //
@@ -336,7 +342,7 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
     <div>
       <button
         type="button"
-        className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${open ? "" : "text-muted-foreground hover:text-foreground"}`}
+        className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-caption font-medium transition-colors mb-2 hover:bg-accent/70 ${open ? "" : "text-muted-foreground hover:text-foreground"}`}
         onClick={() => setOpen(!open)}
       >
         {t(($) => $.resources.section_header)}
@@ -347,7 +353,7 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
       {open && (
         <div className="pl-2 space-y-1.5">
           {resources.length === 0 && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {t(($) => $.resources.empty)}
             </p>
           )}
@@ -365,23 +371,27 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
               ))}
             </div>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              setAddOpen((value) => {
-                if (value) setRepoSearch("");
-                return !value;
-              });
+          <Popover
+            open={addOpen}
+            onOpenChange={(value) => {
+              setAddOpen(value);
+              if (!value) setRepoSearch("");
             }}
           >
-            <Plus className="size-3" />
-            {t(($) => $.resources.add_button)}
-          </Button>
-          {addOpen && (
-            <div className="space-y-2 rounded-md border bg-muted/10 p-2">
-              <div className="text-xs font-medium text-muted-foreground">
+            <PopoverTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-caption text-muted-foreground hover:text-foreground"
+                >
+                  <Plus className="size-3" />
+                  {t(($) => $.resources.add_button)}
+                </Button>
+              }
+            />
+            <PopoverContent align="start" className="w-72 p-2 space-y-2">
+              <div className="text-caption font-medium text-muted-foreground">
                 {t(($) => $.resources.popover_title)}
               </div>
               {enablement.github && workspace?.repos && workspace.repos.length > 0 && (
@@ -394,12 +404,12 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                       onChange={(e) => setRepoSearch(e.target.value)}
                       aria-label={t(($) => $.resources.repos_search_placeholder)}
                       placeholder={t(($) => $.resources.repos_search_placeholder)}
-                      className="h-8 w-full rounded-md border bg-transparent pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                      className="h-8 w-full rounded-md border bg-transparent pl-7 pr-2 text-caption outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
                     />
                   </div>
                   <div className="max-h-48 space-y-1 overflow-y-auto">
                     {filteredRepos.length === 0 && repoQuery && (
-                      <p className="py-2 text-center text-xs text-muted-foreground">
+                      <p className="py-2 text-center text-caption text-muted-foreground">
                         {t(($) => $.resources.repos_search_empty)}
                       </p>
                     )}
@@ -417,20 +427,21 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                           onClick={async () => {
                             if (isDisabled) return;
                             await handleAttach(repo.url);
+                            setAddOpen(false);
                           }}
-                          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left hover:bg-accent transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent"
+                          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-caption text-left hover:bg-accent transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent"
                         >
                           <FolderGit className="size-3.5" />
                           <Tooltip>
                             <TooltipTrigger
                               render={
-                                <span className="truncate flex-1">{repo.url}</span>
+                                <span className="truncate flex-1">{githubShortLabel(repo.url)}</span>
                               }
                             />
                             <TooltipContent side="top">{repo.url}</TooltipContent>
                           </Tooltip>
                           {isAttached && (
-                            <span className="text-[10px] text-muted-foreground">
+                            <span className="text-micro text-muted-foreground">
                               {t(($) => $.resources.attached_badge)}
                             </span>
                           )}
@@ -444,6 +455,7 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                 <CustomRepoForm
                   onSubmit={async (url) => {
                     await handleAttach(url);
+                    setAddOpen(false);
                   }}
                 />
               )}
@@ -455,6 +467,7 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                   submitLabel={t(($) => $.resources.gitlab_submit)}
                   onSubmit={async (url) => {
                     await handleAttachGitLab(url);
+                    setAddOpen(false);
                   }}
                 />
               )}
@@ -466,9 +479,10 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                     valuePlaceholder={t(($) => $.resources.feishu_drive_placeholder)}
                     labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
                     submitLabel={t(($) => $.resources.external_submit)}
-                    onSubmit={(value, label) =>
-                      handleAttachExternalResource("feishu_drive", value, label)
-                    }
+                    onSubmit={async (value, label) => {
+                      await handleAttachExternalResource("feishu_drive", value, label);
+                      setAddOpen(false);
+                    }}
                   />
                   <ExternalResourceForm
                     icon={<BookOpen className="size-3.5" />}
@@ -476,9 +490,10 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                     valuePlaceholder={t(($) => $.resources.feishu_wiki_placeholder)}
                     labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
                     submitLabel={t(($) => $.resources.external_submit)}
-                    onSubmit={(value, label) =>
-                      handleAttachExternalResource("feishu_wiki", value, label)
-                    }
+                    onSubmit={async (value, label) => {
+                      await handleAttachExternalResource("feishu_wiki", value, label);
+                      setAddOpen(false);
+                    }}
                   />
                 </>
               )}
@@ -490,9 +505,10 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                     valuePlaceholder={t(($) => $.resources.zentao_project_placeholder)}
                     labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
                     submitLabel={t(($) => $.resources.external_submit)}
-                    onSubmit={(value, label) =>
-                      handleAttachExternalResource("zentao_project", value, label)
-                    }
+                    onSubmit={async (value, label) => {
+                      await handleAttachExternalResource("zentao_project", value, label);
+                      setAddOpen(false);
+                    }}
                   />
                   <ExternalResourceForm
                     icon={<Kanban className="size-3.5" />}
@@ -500,20 +516,21 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                     valuePlaceholder={t(($) => $.resources.zentao_product_placeholder)}
                     labelPlaceholder={t(($) => $.resources.resource_label_placeholder)}
                     submitLabel={t(($) => $.resources.external_submit)}
-                    onSubmit={(value, label) =>
-                      handleAttachExternalResource("zentao_product", value, label)
-                    }
+                    onSubmit={async (value, label) => {
+                      await handleAttachExternalResource("zentao_product", value, label);
+                      setAddOpen(false);
+                    }}
                   />
                 </>
               )}
-            </div>
-          )}
+            </PopoverContent>
+          </Popover>
           {desktopMode && (
             <div className="flex flex-col">
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 justify-start px-2 text-xs text-muted-foreground hover:text-foreground"
+                className="h-7 justify-start px-2 text-caption text-muted-foreground hover:text-foreground"
                 disabled={
                   picking ||
                   createResource.isPending ||
@@ -528,12 +545,12 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
                 {t(($) => $.resources.add_local_directory_button)}
               </Button>
               {!daemonStatus.running && (
-                <p className="px-2 pt-0.5 text-[10px] text-muted-foreground">
+                <p className="px-2 pt-0.5 text-micro text-muted-foreground">
                   {t(($) => $.resources.local_daemon_offline_hint)}
                 </p>
               )}
               {daemonStatus.running && hasLocalDirectoryForCurrentDaemon && (
-                <p className="px-2 pt-0.5 text-[10px] text-muted-foreground">
+                <p className="px-2 pt-0.5 text-micro text-muted-foreground">
                   {t(($) => $.resources.local_daemon_already_attached_hint)}
                 </p>
               )}
@@ -566,8 +583,10 @@ function ResourceRow({
   const { t } = useT("projects");
   if (isGithubRef(resource)) {
     const ref = resource.resource_ref;
+    const display = resource.label || (ref.ref ? `${githubShortLabel(ref.url)} @ ${ref.ref}` : githubShortLabel(ref.url));
+    const tooltip = ref.ref ? `${ref.url}\nref: ${ref.ref}` : ref.url;
     return (
-      <div className="flex items-center gap-2 text-xs group">
+      <div className="flex items-center gap-2 text-caption group">
         <FolderGit className="size-3.5 text-muted-foreground shrink-0" />
         <Tooltip>
           <TooltipTrigger
@@ -578,11 +597,11 @@ function ResourceRow({
                 rel="noopener noreferrer"
                 className="truncate flex-1 hover:underline"
               >
-                {resource.label || ref.url}
+                {display}
               </a>
             }
           />
-          <TooltipContent side="top">{ref.url}</TooltipContent>
+          <TooltipContent side="top" className="whitespace-pre-line">{tooltip}</TooltipContent>
         </Tooltip>
         <button
           type="button"
@@ -674,7 +693,7 @@ function ResourceRow({
   }
 
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="flex items-center gap-2 text-caption text-muted-foreground">
       <span className="truncate flex-1">
         {resource.label || resource.resource_type}
       </span>
@@ -705,7 +724,7 @@ function LinkResourceRow({
 }) {
   const { t } = useT("projects");
   return (
-    <div className="flex items-center gap-2 text-xs group">
+    <div className="flex items-center gap-2 text-caption group">
       {icon}
       <Tooltip>
         <TooltipTrigger
@@ -752,7 +771,7 @@ function ExternalResourceRow({
     <span className="truncate flex-1 hover:underline">{label}</span>
   );
   return (
-    <div className="flex items-center gap-2 text-xs group">
+    <div className="flex items-center gap-2 text-caption group">
       {icon}
       <Tooltip>
         <TooltipTrigger
@@ -827,7 +846,7 @@ function LocalDirectoryRow({
 
   return (
     <div
-      className={`flex items-center gap-2 text-xs group ${
+      className={`flex items-center gap-2 text-caption group ${
         mismatch ? "opacity-60" : ""
       }`}
     >
@@ -847,7 +866,7 @@ function LocalDirectoryRow({
               cancel();
             }
           }}
-          className="flex-1 min-w-0 rounded-sm border bg-transparent px-1 py-0.5 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex-1 min-w-0 rounded-sm border bg-transparent px-1 py-0.5 text-caption outline-none focus-visible:ring-1 focus-visible:ring-ring"
           aria-label={t(($) => $.resources.local_rename_label)}
         />
       ) : (
@@ -858,7 +877,7 @@ function LocalDirectoryRow({
             }
           />
           <TooltipContent side="top">
-            <div className="space-y-0.5 text-[11px]">
+            <div className="space-y-0.5 text-micro">
               <div className="font-mono">{ref.local_path}</div>
               {mismatch && (
                 <div className="text-muted-foreground">
@@ -924,7 +943,7 @@ function CustomRepoForm({
   return (
     <form onSubmit={handle} className="space-y-1.5 pt-2 border-t">
       {title && (
-        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <div className="flex items-center gap-1.5 text-micro font-medium text-muted-foreground">
           {icon}
           {title}
         </div>
@@ -935,13 +954,13 @@ function CustomRepoForm({
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder={placeholder ?? t(($) => $.resources.url_placeholder)}
-          className="flex-1 bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+          className="flex-1 bg-transparent text-caption px-2 py-1 outline-none placeholder:text-muted-foreground"
         />
         <Button
           type="submit"
           size="sm"
           variant="ghost"
-          className="h-6 px-2 text-xs"
+          className="h-6 px-2 text-caption"
           disabled={!url.trim() || submitting}
         >
           {submitLabel ?? t(($) => $.resources.url_submit)}
@@ -984,7 +1003,7 @@ function ExternalResourceForm({
   };
   return (
     <form onSubmit={handle} className="space-y-1.5 pt-2 border-t">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+      <div className="flex items-center gap-1.5 text-micro font-medium text-muted-foreground">
         {icon}
         {title}
       </div>
@@ -993,7 +1012,7 @@ function ExternalResourceForm({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={valuePlaceholder}
-        className="w-full bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+        className="w-full bg-transparent px-2 py-1 text-caption outline-none placeholder:text-muted-foreground"
       />
       <div className="flex items-center gap-1.5">
         <input
@@ -1001,13 +1020,13 @@ function ExternalResourceForm({
           value={label}
           onChange={(e) => setLabel(e.target.value)}
           placeholder={labelPlaceholder}
-          className="flex-1 bg-transparent text-xs px-2 py-1 outline-none placeholder:text-muted-foreground"
+          className="flex-1 bg-transparent px-2 py-1 text-caption outline-none placeholder:text-muted-foreground"
         />
         <Button
           type="submit"
           size="sm"
           variant="ghost"
-          className="h-6 px-2 text-xs"
+          className="h-6 px-2 text-caption"
           disabled={!value.trim() || submitting}
         >
           {submitLabel}

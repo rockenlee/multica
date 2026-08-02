@@ -1,0 +1,2 @@
+-- Column compatibility is intentionally irreversible. Indexes are removed by
+-- their dedicated concurrent-index down migrations.

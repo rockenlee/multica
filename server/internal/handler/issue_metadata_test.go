@@ -214,6 +214,50 @@ func TestListIssuesMetadataFilter(t *testing.T) {
 		t.Errorf("waiting issue %s missing from filter result; got %d issues", waitingID, len(listResp.Issues))
 	}
 
+	for issueID, sourceSystem := range map[string]string{
+		waitingID: "gitlab",
+		doneID:    "zentao",
+	} {
+		w = httptest.NewRecorder()
+		req = newRequest("PUT", "/api/issues/"+issueID+"/metadata/source_system",
+			json.RawMessage(`{"value":"`+sourceSystem+`"}`))
+		req = withURLParams(req, "id", issueID, "key", "source_system")
+		testHandler.SetIssueMetadataKey(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("seed source %s: %d %s", issueID, w.Code, w.Body.String())
+		}
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("GET", "/api/issues?source_systems=gitlab,lark", nil)
+	testHandler.ListIssues(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("source filter: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	listResp = struct {
+		Issues []IssueResponse `json:"issues"`
+	}{}
+	json.NewDecoder(w.Body).Decode(&listResp)
+	foundWaiting = false
+	for _, iss := range listResp.Issues {
+		if iss.ID == doneID {
+			t.Errorf("source filter leaked ZenTao issue %s", doneID)
+		}
+		if iss.ID == waitingID {
+			foundWaiting = true
+		}
+	}
+	if !foundWaiting {
+		t.Errorf("source filter omitted GitLab issue %s", waitingID)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("GET", "/api/issues?source_systems=unknown", nil)
+	testHandler.ListIssues(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid source filter: expected 400, got %d", w.Code)
+	}
+
 	// Malformed filter → 400.
 	w = httptest.NewRecorder()
 	req = newRequest("GET", `/api/issues?metadata={not-json}`, nil)

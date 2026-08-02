@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_integration_issue_sync_setting_user;

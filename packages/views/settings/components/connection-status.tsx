@@ -25,7 +25,7 @@ export function ConnectionStatusBadge({
   label: string;
 }) {
   return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] ${STATUS_CLASS[status]}`}>
+    <span className={`rounded px-1.5 py-0.5 text-micro ${STATUS_CLASS[status]}`}>
       {label}
     </span>
   );

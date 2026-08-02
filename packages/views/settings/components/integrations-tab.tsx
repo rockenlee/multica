@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Cloud,
@@ -16,7 +15,11 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@multica/core/api";
+import { LarkTab } from "./lark-tab";
+import { ComposioTab } from "./composio-tab";
+import { SlackTab } from "./slack-tab";
+import { VCSTab } from "./vcs-tab";
+import { api, ApiError } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { integrationsOptions, integrationKeys } from "@multica/core/integrations";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -32,9 +35,12 @@ import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
 import { Switch } from "@multica/ui/components/ui/switch";
-import { LarkTab } from "./lark-tab";
-import { useNavigation } from "../../navigation";
+import { composioToolkitsOptions } from "@multica/core/composio";
+import { useConfigStore, useFeatureEnabled } from "@multica/core/config";
+import { COMPOSIO_MCP_APPS_FLAG } from "@multica/core/feature-flags";
 import { useT } from "../../i18n";
+import { useNavigation } from "../../navigation";
+import { SettingsSection, SettingsTab } from "./settings-layout";
 
 type ProviderDefinition = {
   provider: IntegrationProvider;
@@ -54,25 +60,52 @@ type ProviderCopy = {
 };
 
 const PROVIDERS: ProviderDefinition[] = [
-  {
-    provider: "gitlab",
-    title: "GitLab",
-    icon: <GitBranch className="h-4 w-4" />,
-  },
-  {
-    provider: "zentao",
-    title: "ZenTao",
-    icon: <Kanban className="h-4 w-4" />,
-  },
-  {
-    provider: "feishu",
-    title: "Feishu",
-    icon: <Cloud className="h-4 w-4" />,
-  },
+  { provider: "gitlab", title: "GitLab", icon: <GitBranch className="h-4 w-4" /> },
+  { provider: "zentao", title: "ZenTao", icon: <Kanban className="h-4 w-4" /> },
+  { provider: "feishu", title: "Feishu", icon: <Cloud className="h-4 w-4" /> },
 ];
 
+// Integrations is the umbrella tab for third-party platform connections.
+// GitHub has its own top-level tab (see github-tab.tsx); everything else
+// — currently Lark, Composio, Slack, and the self-hosted Git providers (Forgejo /
+// Gitea / GitLab), with Linear etc. to follow — lives in here under its own
+// section heading so additional integrations slot in without changing the IA.
+// IntegrationsTab is just the host; each integration owns its own description
+// and install flow.
 export function IntegrationsTab() {
-  return <IntegrationCenterOverview />;
+  const { t } = useT("settings");
+  const composioEnabled = useFeatureEnabled(COMPOSIO_MCP_APPS_FLAG, false);
+  const composioToolkits = useQuery({
+    ...composioToolkitsOptions(),
+    enabled: composioEnabled,
+  });
+  const composioUnconfigured =
+    composioToolkits.error instanceof ApiError && composioToolkits.error.status === 503;
+  const vcsAvailable = useConfigStore((state) => state.vcsIntegrationAvailable);
+
+  return (
+    <SettingsTab title={t(($) => $.page.tabs.integrations)}>
+      <SettingsSection title={t(($) => $.enterprise_integrations.center_title)}>
+        <IntegrationCenterOverview />
+      </SettingsSection>
+      <SettingsSection title={t(($) => $.lark.section_title)}>
+        <LarkTab />
+      </SettingsSection>
+      {composioEnabled && !composioUnconfigured && (
+        <SettingsSection title={t(($) => $.composio.section_title)}>
+          <ComposioTab />
+        </SettingsSection>
+      )}
+      <SettingsSection title={t(($) => $.slack.section_title)}>
+        <SlackTab />
+      </SettingsSection>
+      {vcsAvailable && (
+        <SettingsSection title={t(($) => $.vcs.section_title)}>
+          <VCSTab />
+        </SettingsSection>
+      )}
+    </SettingsTab>
+  );
 }
 
 export function GitLabIntegrationTab() {
@@ -100,7 +133,6 @@ export function GitLabFeaturesCard() {
   const qc = useQueryClient();
   const { wsId, connection, canManage } = useProviderConnectionContext("gitlab");
   const [savingKey, setSavingKey] = useState<GitLabFeatureKey | null>(null);
-
   const enabled = connection?.sync_enabled === true;
   const config = (connection?.config ?? {}) as Record<string, unknown>;
   const flag = (key: GitLabFeatureKey) => config[key] === true;
@@ -120,12 +152,8 @@ export function GitLabFeaturesCard() {
         config: { ...(connection.config ?? {}), [key]: next },
       });
       await qc.invalidateQueries({ queryKey: integrationKeys.list(wsId) });
-    } catch (e) {
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : t(($) => $.enterprise_integrations.connection_save_failed),
-      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t(($) => $.enterprise_integrations.connection_save_failed));
     } finally {
       setSavingKey(null);
     }
@@ -134,73 +162,31 @@ export function GitLabFeaturesCard() {
   return (
     <Card>
       <CardContent className="space-y-4">
-        <GitLabFeatureRow
-          id="gitlab-mr-sidebar"
-          icon={<PanelRight className="h-4 w-4" />}
-          label={t(($) => $.github.gitlab_feature_mr_sidebar_label)}
-          description={t(($) => $.github.gitlab_feature_mr_sidebar_description)}
-          checked={flag("mr_sidebar_enabled")}
-          disabled={rowDisabled("mr_sidebar_enabled")}
-          onCheckedChange={(v) => void persistFlag("mr_sidebar_enabled", v)}
-        />
-        <GitLabFeatureRow
-          id="gitlab-auto-link"
-          icon={<Link2 className="h-4 w-4" />}
-          label={t(($) => $.github.gitlab_feature_auto_link_label)}
-          description={t(($) => $.github.gitlab_feature_auto_link_description)}
-          checked={flag("auto_link_mrs_enabled")}
-          disabled={rowDisabled("auto_link_mrs_enabled")}
-          onCheckedChange={(v) => void persistFlag("auto_link_mrs_enabled", v)}
-        />
-        <GitLabFeatureRow
-          id="gitlab-co-author"
-          icon={<GitCommitHorizontal className="h-4 w-4" />}
-          label={t(($) => $.github.gitlab_feature_co_author_label)}
-          description={t(($) => $.github.gitlab_feature_co_author_description)}
-          checked={flag("co_authored_by_enabled")}
-          disabled={rowDisabled("co_authored_by_enabled")}
-          onCheckedChange={(v) => void persistFlag("co_authored_by_enabled", v)}
-        />
-        <GitLabFeatureRow
-          id="gitlab-status-advance"
-          icon={<GitMerge className="h-4 w-4" />}
-          label={t(($) => $.github.gitlab_feature_status_advance_label)}
-          description={t(($) => $.github.gitlab_feature_status_advance_description)}
-          checked={flag("status_advance_enabled")}
-          disabled={rowDisabled("status_advance_enabled")}
-          onCheckedChange={(v) => void persistFlag("status_advance_enabled", v)}
-        />
+        <GitLabFeatureRow id="gitlab-mr-sidebar" icon={<PanelRight className="h-4 w-4" />} label={t(($) => $.github.gitlab_feature_mr_sidebar_label)} description={t(($) => $.github.gitlab_feature_mr_sidebar_description)} checked={flag("mr_sidebar_enabled")} disabled={rowDisabled("mr_sidebar_enabled")} onCheckedChange={(value) => void persistFlag("mr_sidebar_enabled", value)} />
+        <GitLabFeatureRow id="gitlab-auto-link" icon={<Link2 className="h-4 w-4" />} label={t(($) => $.github.gitlab_feature_auto_link_label)} description={t(($) => $.github.gitlab_feature_auto_link_description)} checked={flag("auto_link_mrs_enabled")} disabled={rowDisabled("auto_link_mrs_enabled")} onCheckedChange={(value) => void persistFlag("auto_link_mrs_enabled", value)} />
+        <GitLabFeatureRow id="gitlab-co-author" icon={<GitCommitHorizontal className="h-4 w-4" />} label={t(($) => $.github.gitlab_feature_co_author_label)} description={t(($) => $.github.gitlab_feature_co_author_description)} checked={flag("co_authored_by_enabled")} disabled={rowDisabled("co_authored_by_enabled")} onCheckedChange={(value) => void persistFlag("co_authored_by_enabled", value)} />
+        <GitLabFeatureRow id="gitlab-status-advance" icon={<GitMerge className="h-4 w-4" />} label={t(($) => $.github.gitlab_feature_status_advance_label)} description={t(($) => $.github.gitlab_feature_status_advance_description)} checked={flag("status_advance_enabled")} disabled={rowDisabled("status_advance_enabled")} onCheckedChange={(value) => void persistFlag("status_advance_enabled", value)} />
       </CardContent>
     </Card>
   );
 }
 
-function GitLabFeatureRow({
-  id,
-  icon,
-  label,
-  description,
-  checked,
-  disabled,
-  onCheckedChange,
-}: {
+function GitLabFeatureRow({ id, icon, label, description, checked, disabled, onCheckedChange }: {
   id: string;
   icon: ReactNode;
   label: string;
   description: string;
   checked: boolean;
   disabled: boolean;
-  onCheckedChange: (v: boolean) => void;
+  onCheckedChange: (value: boolean) => void;
 }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex items-start gap-3">
         <div className="rounded-md border bg-muted/50 p-2 text-muted-foreground">{icon}</div>
         <div className="space-y-1">
-          <Label htmlFor={id} className="text-sm font-medium">
-            {label}
-          </Label>
-          <p className="text-sm text-muted-foreground">{description}</p>
+          <Label htmlFor={id} className="text-body font-medium">{label}</Label>
+          <p className="text-body text-muted-foreground">{description}</p>
         </div>
       </div>
       <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
@@ -219,70 +205,38 @@ export function FeishuIntegrationTab() {
 function ProviderSettingsPage({ providers }: { providers: IntegrationProvider[] }) {
   const { t } = useT("settings");
   const wsId = useWorkspaceId();
-  const user = useAuthStore((s) => s.user);
+  const user = useAuthStore((state) => state.user);
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data, isLoading } = useQuery(integrationsOptions(wsId));
-
-  const currentMember = members.find((m) => m.user_id === user?.id) ?? null;
-  const canManage =
-    currentMember?.role === "owner" || currentMember?.role === "admin";
-
+  const currentMember = members.find((member) => member.user_id === user?.id) ?? null;
+  const canManage = currentMember?.role === "owner" || currentMember?.role === "admin";
   const connections = data?.connections ?? [];
   const providerCopy = useProviderCopy();
-  const activeDefinitions = PROVIDERS.filter((definition) =>
-    providers.includes(definition.provider),
-  );
-  const providerTitle =
-    activeDefinitions.length === 1
-      ? providerCopy[activeDefinitions[0]!.provider].title
-      : t(($) => $.enterprise_integrations.title);
+  const activeDefinitions = PROVIDERS.filter((definition) => providers.includes(definition.provider));
+  const providerTitle = activeDefinitions.length === 1
+    ? providerCopy[activeDefinitions[0]!.provider].title
+    : t(($) => $.enterprise_integrations.title);
 
   return (
-    <div className="space-y-10">
-      <section className="space-y-4">
-        <div className="space-y-1">
-          <h2 className="text-sm font-semibold">
-            {providerTitle}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {activeDefinitions.length === 1
-              ? providerCopy[activeDefinitions[0]!.provider].subtitle
-              : t(($) => $.enterprise_integrations.description)}
-          </p>
-        </div>
+    <SettingsTab title={providerTitle}>
+      <SettingsSection title={providerTitle}>
         {isLoading ? (
-          <Card>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">{t(($) => $.lark.loading)}</p>
-            </CardContent>
-          </Card>
+          <div className="text-body text-muted-foreground">{t(($) => $.lark.loading)}</div>
         ) : (
           <div className="space-y-4">
-            <div
-              className={
-                activeDefinitions.length === 1
-                  ? "space-y-4"
-                  : "grid gap-4 xl:grid-cols-3"
-              }
-            >
-              {activeDefinitions.map((definition) => {
-                const connection =
-                  connections.find((item) => item.provider === definition.provider) ?? null;
-                return (
-                  <ProviderCard
-                    key={definition.provider}
-                    definition={definition}
-                    copy={providerCopy[definition.provider]}
-                    connection={connection}
-                    canManage={canManage}
-                  />
-                );
-              })}
-            </div>
+            {activeDefinitions.map((definition) => (
+              <ProviderCard
+                key={definition.provider}
+                definition={definition}
+                copy={providerCopy[definition.provider]}
+                connection={connections.find((item) => item.provider === definition.provider) ?? null}
+                canManage={canManage}
+              />
+            ))}
           </div>
         )}
-      </section>
-    </div>
+      </SettingsSection>
+    </SettingsTab>
   );
 }
 
@@ -361,10 +315,10 @@ function ProviderFeatureToggleCard({ provider }: { provider: IntegrationProvider
               {definition.icon}
             </div>
             <div className="space-y-1">
-              <Label htmlFor={`${provider}-master`} className="text-sm font-medium">
+              <Label htmlFor={`${provider}-master`} className="text-body font-medium">
                 {t(($) => $.github.gitlab_section_master)}
               </Label>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body text-muted-foreground">
                 {description}
               </p>
             </div>
@@ -444,8 +398,8 @@ function ProviderConnectionFormCard({ provider }: { provider: IntegrationProvide
               {definition.icon}
             </div>
             <div className="min-w-0 space-y-1">
-              <h3 className="text-sm font-semibold">{copy.title}</h3>
-              <p className="text-xs text-muted-foreground">{copy.subtitle}</p>
+              <h3 className="text-body font-semibold">{copy.title}</h3>
+              <p className="text-caption text-muted-foreground">{copy.subtitle}</p>
             </div>
           </div>
           <Button
@@ -474,17 +428,17 @@ function ProviderConnectionFormCard({ provider }: { provider: IntegrationProvide
             disabled={!canManage}
           />
           {!canManage && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {t(($) => $.enterprise_integrations.admin_required)}
             </p>
           )}
         </div>
 
         <div className="flex flex-col gap-1 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs font-medium text-muted-foreground">
+          <div className="text-caption font-medium text-muted-foreground">
             {t(($) => $.enterprise_integrations.my_account)}
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.enterprise_integrations.account_management_hint)}
           </p>
         </div>
@@ -518,10 +472,10 @@ function IntegrationCenterOverview() {
   return (
     <div className="space-y-8">
       <section className="space-y-1">
-        <h2 className="text-sm font-semibold">
+        <h2 className="text-body font-semibold">
           {t(($) => $.enterprise_integrations.center_title)}
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           {t(($) => $.enterprise_integrations.center_description)}
         </p>
       </section>
@@ -529,7 +483,7 @@ function IntegrationCenterOverview() {
       {isLoading ? (
         <Card>
           <CardContent>
-            <p className="text-sm text-muted-foreground">{t(($) => $.lark.loading)}</p>
+            <p className="text-body text-muted-foreground">{t(($) => $.lark.loading)}</p>
           </CardContent>
         </Card>
       ) : (
@@ -563,26 +517,26 @@ function IntegrationCenterOverview() {
                     </div>
                     <div className="min-w-0 space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-body font-semibold">
                           {providerCopy[definition.provider].title}
                         </h3>
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                           {connection?.sync_enabled
                             ? t(($) => $.enterprise_integrations.sync_on)
                             : t(($) => $.enterprise_integrations.sync_off)}
                         </span>
                         {needsAttention && (
-                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700">
+                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-micro text-amber-700">
                             {t(($) => $.integrations.status.action_needed)}
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-caption text-muted-foreground">
                         {connection?.base_url || t(($) => $.enterprise_integrations.not_connected)}
                       </p>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+                  <div className="grid grid-cols-2 gap-2 text-caption text-muted-foreground">
                     <div>
                       <div className="font-medium text-foreground">{accountCount}</div>
                       {t(($) => $.enterprise_integrations.accounts_count)}
@@ -663,15 +617,15 @@ function WorkspaceAccountsOverview({
     <Card>
       <CardContent className="space-y-3">
         <div className="space-y-1">
-          <h3 className="text-sm font-semibold">
+          <h3 className="text-body font-semibold">
             {t(($) => $.enterprise_integrations.workspace_accounts_title)}
           </h3>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.enterprise_integrations.workspace_accounts_description)}
           </p>
         </div>
         {accounts.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.enterprise_integrations.workspace_accounts_empty)}
           </p>
         ) : (
@@ -684,22 +638,22 @@ function WorkspaceAccountsOverview({
                   className="flex items-start justify-between gap-3 px-3 py-2"
                 >
                   <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2 text-caption">
                       <span className="font-medium text-foreground">
                         {account.account_name}
                       </span>
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                         {connection?.name ?? account.connection_id}
                       </span>
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                         {account.status}
                       </span>
                     </div>
-                    <p className="truncate text-xs text-muted-foreground">
+                    <p className="truncate text-caption text-muted-foreground">
                       {account.external_username || account.external_user_id || account.account_key}
                     </p>
                     {account.scopes.length > 0 && (
-                      <p className="truncate text-[10px] text-muted-foreground">
+                      <p className="truncate text-micro text-muted-foreground">
                         {account.scopes.join(", ")}
                       </p>
                     )}
@@ -740,13 +694,13 @@ function EventHealthLine({ event }: { event: IntegrationSyncEvent | null }) {
   };
   if (!event) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         {t(($) => $.enterprise_integrations.no_sync_events)}
       </p>
     );
   }
   return (
-    <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+    <div className="rounded-md border bg-muted/30 px-3 py-2 text-caption">
       <div className="flex items-center justify-between gap-3">
         <span className="font-medium text-foreground">
           {statusLabels[event.status as keyof typeof statusLabels] ?? event.status}
@@ -778,11 +732,11 @@ function RecentSyncEvents({ events }: { events: IntegrationSyncEvent[] }) {
   return (
     <Card>
       <CardContent className="space-y-3">
-        <h3 className="text-sm font-semibold">
+        <h3 className="text-body font-semibold">
           {t(($) => $.enterprise_integrations.recent_events_title)}
         </h3>
         {events.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.enterprise_integrations.no_sync_events)}
           </p>
         ) : (
@@ -790,20 +744,20 @@ function RecentSyncEvents({ events }: { events: IntegrationSyncEvent[] }) {
             {events.map((event) => (
               <div key={event.id} className="flex items-start justify-between gap-4 px-3 py-2">
                 <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2 text-caption">
                     <span className="font-medium text-foreground">{event.provider}</span>
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                       {directionLabels[event.direction as keyof typeof directionLabels] ?? event.direction}
                     </span>
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                       {statusLabels[event.status as keyof typeof statusLabels] ?? event.status}
                     </span>
                   </div>
-                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                  <p className="mt-1 truncate text-caption text-muted-foreground">
                     {event.error || event.message || event.object_type}
                   </p>
                 </div>
-                <span className="shrink-0 text-xs text-muted-foreground">
+                <span className="shrink-0 text-caption text-muted-foreground">
                   {formatIntegrationEventTime(event.occurred_at)}
                 </span>
               </div>
@@ -996,14 +950,14 @@ function ProviderCard({
             </div>
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">{copy.title}</h3>
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                <h3 className="text-body font-semibold">{copy.title}</h3>
+                <span className="rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                   {connection?.sync_enabled === true
                     ? t(($) => $.enterprise_integrations.sync_on)
                     : t(($) => $.enterprise_integrations.sync_off)}
                 </span>
               </div>
-              <p className="text-xs text-muted-foreground">{copy.subtitle}</p>
+              <p className="text-caption text-muted-foreground">{copy.subtitle}</p>
             </div>
           </div>
           <Button
@@ -1041,7 +995,7 @@ function ProviderCard({
             disabled={!canManage}
           />
           {!canManage && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {t(($) => $.enterprise_integrations.admin_required)}
             </p>
           )}
@@ -1082,7 +1036,7 @@ function ProviderCard({
         )}
 
         <div className="space-y-2 border-t pt-4">
-          <div className="text-xs font-medium text-muted-foreground">
+          <div className="text-caption font-medium text-muted-foreground">
             {t(($) => $.enterprise_integrations.sync_scope_title)}
           </div>
           <div className="grid gap-2 md:grid-cols-2">
@@ -1100,10 +1054,10 @@ function ProviderCard({
         </div>
 
         <div className="flex flex-col gap-1 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs font-medium text-muted-foreground">
+          <div className="text-caption font-medium text-muted-foreground">
             {t(($) => $.enterprise_integrations.my_account)}
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.enterprise_integrations.account_management_hint)}
           </p>
         </div>
@@ -1155,7 +1109,7 @@ function ToggleRow({
 }) {
   return (
     <div className="flex items-center justify-between gap-4">
-      <Label htmlFor={id} className="text-xs font-medium text-muted-foreground">
+      <Label htmlFor={id} className="text-caption font-medium text-muted-foreground">
         {label}
       </Label>
       <Switch

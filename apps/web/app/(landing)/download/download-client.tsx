@@ -15,7 +15,6 @@ import {
 } from "@/features/landing/utils/os-detect";
 import type { LatestRelease } from "@/features/landing/utils/github-release";
 import type { DownloadSource } from "@/features/landing/utils/download-source";
-import { captureDownloadPageViewed } from "@multica/core/analytics";
 
 export function DownloadClient({
   release,
@@ -32,25 +31,11 @@ export function DownloadClient({
     detectOS().then((result) => {
       if (cancelled) return;
       setDetected(result);
-      // Fires once per page mount after detect resolves. Carries the
-      // detect outcome + version-unavailable flag so PostHog can split
-      // Safari-mac-arm64 fallback rate, Intel-Mac dead-end rate, and
-      // rate-limit degraded sessions. `first_detected_os/arch` is
-      // $set_once'd on the person so every downstream event gains a
-      // platform dimension (useful for "Android visitors who later
-      // downloaded Windows" style cross-device queries once we land
-      // the desktop install closure).
-      captureDownloadPageViewed({
-        detected_os: result.os,
-        detected_arch: result.arch,
-        detect_confident: result.archConfident,
-        version_available: !versionUnavailable,
-      });
     });
     return () => {
       cancelled = true;
     };
-  }, [versionUnavailable]);
+  }, []);
 
   const releaseHtmlUrl = release.htmlUrl ?? downloadSource.allReleasesUrl;
 
@@ -68,15 +53,12 @@ export function DownloadClient({
           detected={detected}
           assets={release.assets}
           versionUnavailable={versionUnavailable}
-          version={release.version}
         />
       </div>
 
       <AllPlatforms
         assets={release.assets}
         fallbackHref={downloadSource.allReleasesUrl}
-        version={release.version}
-        detected={detected}
       />
       <CliSection
         installCommand={downloadSource.installCommand}
@@ -107,7 +89,7 @@ function VersionInfoFooter({
 
   return (
     <section className="bg-white pb-16 text-[#0a0d12] sm:pb-20">
-      <div className="mx-auto flex max-w-[920px] flex-wrap items-center gap-x-6 gap-y-2 border-t border-[#0a0d12]/8 px-4 pt-8 text-[13px] text-[#0a0d12]/60 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-[920px] flex-wrap items-center gap-x-6 gap-y-2 border-t border-[#0a0d12]/8 px-4 pt-8 text-label text-[#0a0d12]/60 sm:px-6 lg:px-8">
         {version ? (
           <>
             <span>

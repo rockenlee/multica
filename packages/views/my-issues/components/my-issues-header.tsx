@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { useStore } from "zustand";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Settings2 } from "lucide-react";
@@ -23,7 +23,12 @@ import {
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
-import type { Issue } from "@multica/core/types";
+import type {
+  Issue,
+  IssueTableFacetSpec,
+  IssueTableFacetsResponse,
+  WorkingAgentSummary,
+} from "@multica/core/types";
 import { myIssuesViewStore, type MyIssuesScope } from "@multica/core/issues/stores/my-issues-view-store";
 import {
   ISSUE_SYNC_PROVIDERS,
@@ -31,17 +36,46 @@ import {
   type IssueSyncProvider,
   type IssueSyncSettings,
 } from "@multica/core/issues";
+import { useViewStore } from "@multica/core/issues/stores/view-store-context";
 import { useT } from "../../i18n";
 import { WorkspaceAgentWorkingChip } from "../../issues/components/workspace-agent-working-chip";
-import { IssueDisplayControls } from "../../issues/components/issues-header";
+import {
+  IssueDisplayControls,
+  ViewRefreshIndicator,
+} from "../../issues/components/issues-header";
 
-const SOURCE_LABEL_KEY: Record<IssueSyncProvider, "source_feishu" | "source_zentao" | "source_gitlab"> = {
+const SOURCE_LABEL_KEY: Record<
+  IssueSyncProvider,
+  "source_feishu" | "source_zentao" | "source_gitlab"
+> = {
   feishu: "source_feishu",
   zentao: "source_zentao",
   gitlab: "source_gitlab",
 };
 
-export function MyIssuesHeader({ allIssues }: { allIssues: Issue[] }) {
+export function MyIssuesHeader({
+  allIssues,
+  workingAgents,
+  scope,
+  onScopeChange,
+  isRefreshing = false,
+  facetCountsExact = true,
+  tableFacetCounts,
+  onTableFacetChange,
+}: {
+  allIssues: Issue[];
+  /** See IssueSurfaceController.workingAgents. My Issues used to ask the
+   *  working-agents endpoint for its own relation-scoped count; the surface
+   *  projection now covers the relation AND every active filter. */
+  workingAgents: WorkingAgentSummary[] | undefined;
+  scope: MyIssuesScope;
+  onScopeChange: (scope: MyIssuesScope) => void;
+  isRefreshing?: boolean;
+  /** See IssueDisplayControls.facetCountsExact. */
+  facetCountsExact?: boolean;
+  tableFacetCounts?: IssueTableFacetsResponse;
+  onTableFacetChange: (facet: IssueTableFacetSpec | null) => void;
+}) {
   const { t } = useT("my-issues");
   const { t: tIssues } = useT("issues");
   const SCOPES: { value: MyIssuesScope; label: string; description: string }[] = [
@@ -50,13 +84,14 @@ export function MyIssuesHeader({ allIssues }: { allIssues: Issue[] }) {
     { value: "created", label: t(($) => $.header.scope.created_label), description: t(($) => $.header.scope.created_description) },
     { value: "agents", label: t(($) => $.header.scope.agents_label), description: t(($) => $.header.scope.agents_description) },
   ];
-  const scope = useStore(myIssuesViewStore, (s) => s.scope);
-  const agentRunningFilter = useStore(myIssuesViewStore, (s) => s.agentRunningFilter);
-  const sourceFilters = useStore(myIssuesViewStore, (s) => s.sourceFilters);
-  const act = myIssuesViewStore.getState();
-  const scopedIssueIds = useMemo(
-    () => new Set(allIssues.map((i) => i.id)),
-    [allIssues],
+  const agentRunningFilter = useViewStore((s) => s.agentRunningFilter);
+  const issueSourceFilters = useStore(myIssuesViewStore, (s) => s.sourceFilters);
+  const toggleAgentRunningFilter = useViewStore(
+    (s) => s.toggleAgentRunningFilter,
+  );
+  const toggleIssueSourceFilter = useStore(
+    myIssuesViewStore,
+    (s) => s.toggleSourceFilter,
   );
   const scopeLabel = SCOPES.find((s) => s.value === scope)?.label ?? SCOPES[0]?.label;
 
@@ -76,7 +111,7 @@ export function MyIssuesHeader({ allIssues }: { allIssues: Issue[] }) {
                         ? "bg-accent text-accent-foreground hover:bg-accent/80"
                         : "text-muted-foreground"
                     }
-                    onClick={() => act.setScope(s.value)}
+                    onClick={() => onScopeChange(s.value)}
                   >
                     {s.label}
                   </Button>
@@ -103,7 +138,7 @@ export function MyIssuesHeader({ allIssues }: { allIssues: Issue[] }) {
           <DropdownMenuContent align="start" className="w-auto">
             <DropdownMenuRadioGroup
               value={scope}
-              onValueChange={(value) => act.setScope(value as MyIssuesScope)}
+              onValueChange={(value) => onScopeChange(value as MyIssuesScope)}
             >
               {SCOPES.map((s) => (
                 <DropdownMenuRadioItem key={s.value} value={s.value}>
@@ -116,21 +151,28 @@ export function MyIssuesHeader({ allIssues }: { allIssues: Issue[] }) {
 
         <div className="flex shrink-0 items-center gap-1">
           {agentRunningFilter && (
-            <span className="mr-1 hidden text-xs text-muted-foreground md:inline">
+            <span className="mr-1 hidden text-caption text-muted-foreground md:inline">
               {tIssues(($) => $.agent_activity.filter_active_label)}
             </span>
           )}
           <WorkspaceAgentWorkingChip
             value={agentRunningFilter}
-            onToggle={act.toggleAgentRunningFilter}
-            scopedIssueIds={scopedIssueIds}
+            onToggle={toggleAgentRunningFilter}
+            agents={workingAgents}
           />
+          <MyIssuesSyncSettingsButton />
           <IssueDisplayControls
             scopedIssues={allIssues}
-            issueSourceFilters={sourceFilters}
-            onToggleIssueSourceFilter={act.toggleSourceFilter}
-            onClearIssueSourceFilters={() => myIssuesViewStore.setState({ sourceFilters: [] })}
+            issueSourceFilters={issueSourceFilters}
+            onToggleIssueSourceFilter={toggleIssueSourceFilter}
+            onClearIssueSourceFilters={() =>
+              myIssuesViewStore.setState({ sourceFilters: [] })
+            }
+            facetCountsExact={facetCountsExact}
+            tableFacetCounts={tableFacetCounts}
+            onTableFacetChange={onTableFacetChange}
           />
+          <ViewRefreshIndicator active={isRefreshing} />
         </div>
       </div>
     </div>
@@ -194,14 +236,14 @@ export function MyIssuesSyncSettingsButton() {
       <PopoverContent align="start" className="w-[360px] p-3">
         <div className="space-y-3">
           <div>
-            <h2 className="text-sm font-medium">{t(($) => $.sync_settings.title)}</h2>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            <h2 className="text-body font-medium">{t(($) => $.sync_settings.title)}</h2>
+            <p className="mt-1 text-caption leading-5 text-muted-foreground">
               {t(($) => $.sync_settings.description)}
             </p>
           </div>
 
           <div className="rounded-md border">
-            <div className="grid grid-cols-[1fr_72px_72px] gap-2 border-b px-3 py-2 text-[11px] font-medium uppercase text-muted-foreground">
+            <div className="grid grid-cols-[1fr_72px_72px] gap-2 border-b px-3 py-2 text-micro font-medium uppercase text-muted-foreground">
               <span>{t(($) => $.sync_settings.channel_column)}</span>
               <span className="text-center">{t(($) => $.sync_settings.inbound_column)}</span>
               <span className="text-center">{t(($) => $.sync_settings.outbound_column)}</span>
@@ -211,7 +253,7 @@ export function MyIssuesSyncSettingsButton() {
                 key={provider}
                 className="grid grid-cols-[1fr_72px_72px] items-center gap-2 border-b px-3 py-2 last:border-b-0"
               >
-                <span className="text-sm">{tIssues(($) => $.sync[SOURCE_LABEL_KEY[provider]])}</span>
+                <span className="text-body">{tIssues(($) => $.sync[SOURCE_LABEL_KEY[provider]])}</span>
                 <div className="flex justify-center">
                   <Switch
                     checked={syncSettings[provider]?.inbound ?? false}
@@ -234,7 +276,7 @@ export function MyIssuesSyncSettingsButton() {
             ))}
           </div>
 
-          <p className="text-xs leading-5 text-muted-foreground">
+          <p className="text-caption leading-5 text-muted-foreground">
             {t(($) => $.sync_settings.resource_hint)}
           </p>
         </div>

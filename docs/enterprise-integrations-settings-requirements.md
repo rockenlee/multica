@@ -17,7 +17,7 @@
 - `apps/docs/content/docs/project-resources.zh.mdx`：现有 project resource 模型。
 - `packages/views/settings/components/settings-page.tsx`：现有 Settings 左侧导航和 tab 归属。
 - `packages/views/settings/components/tokens-tab.tsx`、`repositories-tab.tsx`、`github-tab.tsx`、`integrations-tab.tsx`：现有设置页行为。
-- `server/migrations/122_integration_module.up.sql`、`server/pkg/db/queries/integration.sql`：当前通用集成模块雏形。
+- `server/migrations/251_integration_module.up.sql`、`server/pkg/db/queries/integration.sql`：当前通用集成模块雏形。
 
 ### 0.1 对原有 docs 的继承关系
 

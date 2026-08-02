@@ -42,7 +42,12 @@ import {
   sortUserItemsByRecency,
 } from "./mention-recency";
 import { matchesPinyin } from "./pinyin-match";
-import { createSuggestionPopupRender } from "./suggestion-popup";
+import {
+  createSuggestionPopupRender,
+  isPickerAcceptKey,
+  pickerNavigationDirection,
+} from "./suggestion-popup";
+import { isTriggerArmedAt } from "./suggestion-trigger-arming";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,7 +151,14 @@ function mergeMentionItems(
 export const MentionList = forwardRef<MentionListRef, MentionListProps>(
   function MentionList({ items, query, command, includeProjectSearch = false }, ref) {
     const { t } = useT("editor");
-    const [selectedIndex, setSelectedIndex] = useState(0);
+    // Selection is tracked by item identity, NOT by a positional index. The
+    // list is re-bucketed by groupItems() and grows asynchronously (server
+    // search results), so a slot index is not a stable target — the row under
+    // index N changes as the list reorders. selectedKey pins the highlight to
+    // a specific item; the numeric index is derived from it against the SAME
+    // order the popup renders (orderedItems). null means "no explicit pick yet"
+    // → the first rendered row is highlighted by default.
+    const [selectedKey, setSelectedKey] = useState<string | null>(null);
     const [serverItems, setServerItems] = useState<MentionItem[]>([]);
     const [isSearching, setIsSearching] = useState(false);
     const [searchedQuery, setSearchedQuery] = useState("");
@@ -232,23 +244,36 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
       return mergeMentionItems(items, currentServerItems).slice(0, MAX_ITEMS);
     }, [items, normalizedQuery, searchedQuery, serverItems]);
 
-    useEffect(() => {
-      setSelectedIndex(0);
-    }, [displayItems]);
+    // The single index space for selection. groupItems() re-buckets displayItems
+    // (current → recent → search → users → issues); orderedItems is exactly what
+    // the popup renders, top to bottom. Keyboard nav, Enter, clicks, highlight,
+    // and scroll all index THIS, so the highlighted row always equals the
+    // committed item — there is no second "data order" to drift against.
+    const groups = useMemo(() => groupItems(displayItems), [displayItems]);
+    const orderedItems = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+
+    // Derive the numeric index from the pinned identity. If the selected item
+    // is no longer in the list (query narrowed it away) or nothing is picked
+    // yet, fall back to the first row. This self-heals across reorders and
+    // async result arrival without ever force-resetting an active selection.
+    const selectedIndex = useMemo(() => {
+      if (selectedKey === null) return 0;
+      const i = orderedItems.findIndex((it) => mentionItemKey(it) === selectedKey);
+      return i === -1 ? 0 : i;
+    }, [orderedItems, selectedKey]);
 
     useEffect(() => {
       itemRefs.current[selectedIndex]?.scrollIntoView({ block: "nearest" });
     }, [selectedIndex]);
 
     const selectItem = useCallback(
-      (index: number) => {
-        const item = displayItems[index];
+      (item: MentionItem | undefined) => {
         if (!item) return;
         const wsId = getCurrentWsId();
         if (wsId) recordMentionUsage(wsId, item);
         command(item);
       },
-      [displayItems, command],
+      [command],
     );
 
     useImperativeHandle(ref, () => ({
@@ -256,34 +281,34 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
         // IME is composing — don't intercept Enter/Arrow as picker actions;
         // those keys belong to the IME (Enter commits composition, etc).
         if (isImeComposing(event)) return false;
-        if (event.key === "ArrowUp") {
-          if (displayItems.length === 0) return true;
-          setSelectedIndex(
-            (i) => (i + displayItems.length - 1) % displayItems.length,
-          );
+        // Arrow keys plus the Ctrl+N/J/P/K aliases the command bar accepts —
+        // see pickerNavigationDirection.
+        const direction = pickerNavigationDirection(event);
+        if (direction !== null) {
+          if (orderedItems.length === 0) return true;
+          const delta = direction === "next" ? 1 : orderedItems.length - 1;
+          const next = (selectedIndex + delta) % orderedItems.length;
+          setSelectedKey(mentionItemKey(orderedItems[next]!));
           return true;
         }
-        if (event.key === "ArrowDown") {
-          if (displayItems.length === 0) return true;
-          setSelectedIndex((i) => (i + 1) % displayItems.length);
-          return true;
-        }
-        if (event.key === "Enter") {
-          if (displayItems.length === 0) return true;
-          selectItem(selectedIndex);
+        // Enter is the canonical accept; plain Tab is an additive alias (see
+        // isPickerAcceptKey). Shift/modifier+Tab fall through to focus nav.
+        if (isPickerAcceptKey(event)) {
+          if (orderedItems.length === 0) return true;
+          selectItem(orderedItems[selectedIndex]);
           return true;
         }
         return false;
       },
     }));
 
-    if (displayItems.length === 0) {
+    if (orderedItems.length === 0) {
       const isWaitingForServer =
         normalizedQuery !== "" &&
         (isSearching || searchedQuery !== normalizedQuery);
 
       return (
-        <div className="rounded-md border bg-popover p-2 text-xs text-muted-foreground shadow-md">
+        <div className="rounded-md border bg-popover p-2 text-caption text-muted-foreground shadow-md">
           {isWaitingForServer
             ? t(($) => $.mention.searching)
             : t(($) => $.mention.no_results)}
@@ -291,8 +316,7 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
       );
     }
 
-    const groups = groupItems(displayItems);
-    const hasContextGroups = displayItems.some((item) => item.group === "current" || item.group === "recent");
+    const hasContextGroups = orderedItems.some((item) => item.group === "current" || item.group === "recent");
     const contextLayout = hasContextGroups;
     const groupLabel = (label: string): string => {
       if (label === "Current") return t(($) => $.mention.group_current);
@@ -314,7 +338,7 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
             key={`${item.type}-${item.id}`}
             item={item}
             selected={idx === selectedIndex}
-            onSelect={() => selectItem(idx)}
+            onSelect={() => selectItem(item)}
             buttonRef={(el) => { itemRefs.current[idx] = el; }}
           />
         );
@@ -331,14 +355,20 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
       <div
         className={cn(
           "flex flex-col overflow-y-auto overscroll-contain border bg-popover py-1",
+          // Height budget: clamp to whichever is smaller — the design max or the
+          // viewport-aware `--suggestion-available-height` published by the
+          // floating-ui `size` middleware (suggestion-popup.tsx). The var falls
+          // back to the design max when the popup renders outside that
+          // controller. This is the single height authority; do not add a second
+          // fixed max-height above it or the list can overflow the viewport.
           contextLayout
-            ? "max-h-[420px] w-96 rounded-lg shadow-xl"
-            : "max-h-[300px] w-72 rounded-md shadow-md",
+            ? "max-h-[min(420px,var(--suggestion-available-height,420px))] w-96 rounded-lg shadow-xl"
+            : "max-h-[min(300px,var(--suggestion-available-height,300px))] w-72 rounded-md shadow-md",
         )}
       >
         {groups.map((group) => (
           <div key={group.label}>
-            <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+            <div className="px-3 py-2 text-micro font-semibold uppercase tracking-wide text-muted-foreground">
               {groupLabel(group.label)}
             </div>
             {renderRows(group)}
@@ -373,7 +403,7 @@ function MentionRow({
       <button
         type="button"
         ref={buttonRef}
-        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors ${
+        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-caption transition-colors ${
           selected ? "bg-accent" : "hover:bg-accent/50"
         } ${isClosed ? "opacity-60" : ""}`}
         onClick={onSelect}
@@ -407,7 +437,7 @@ function MentionRow({
       <button
         type="button"
         ref={buttonRef}
-        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors ${
+        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-caption transition-colors ${
           selected ? "bg-accent" : "hover:bg-accent/50"
         }`}
         onClick={onSelect}
@@ -434,7 +464,7 @@ function MentionRow({
     <button
       type="button"
       ref={buttonRef}
-      className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-xs transition-colors ${
+      className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-caption transition-colors ${
         selected ? "bg-accent" : "hover:bg-accent/50"
       }`}
       onClick={onSelect}
@@ -442,7 +472,7 @@ function MentionRow({
       <ActorAvatar
         actorType={item.type === "all" ? "member" : item.type}
         actorId={item.id}
-        size={20}
+        size="sm"
         showStatusDot
       />
       <span className="truncate font-medium">
@@ -451,12 +481,12 @@ function MentionRow({
       {item.type === "agent" && (
         // "Agent" is a glossary-protected product term — kept un-translated.
         // eslint-disable-next-line i18next/no-literal-string
-        <Badge variant="outline" className="ml-auto text-[10px] h-4 px-1.5">Agent</Badge>
+        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">Agent</Badge>
       )}
       {item.type === "squad" && (
         // "Squad" is a glossary-protected product term — kept un-translated.
         // eslint-disable-next-line i18next/no-literal-string
-        <Badge variant="outline" className="ml-auto text-[10px] h-4 px-1.5">Squad</Badge>
+        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">Squad</Badge>
       )}
     </button>
   );
@@ -589,6 +619,11 @@ export function createMentionSuggestion(
 
   return {
     pluginKey,
+    allowSpaces: true,
+    // Only open over an `@` the user actually typed. Tiptap matches on document
+    // content alone, so without this a pasted, dropped, undone or server-loaded
+    // `@` opens the picker just as readily (MUL-5429).
+    shouldShow: ({ editor, range }) => isTriggerArmedAt(editor, range.from),
     items: ({ query }) => {
       if (options.mode === "context") {
         const normalizedQuery = query.trim();
