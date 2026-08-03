@@ -10,9 +10,9 @@ describe("runtime config", () => {
   it("uses cloud defaults without a desktop.json file", () => {
     expect(DEFAULT_RUNTIME_CONFIG).toEqual({
       schemaVersion: 1,
-      apiUrl: "https://api.multica.ai",
-      wsUrl: "wss://api.multica.ai/ws",
-      appUrl: "https://multica.ai",
+      apiUrl: "http://192.168.9.19:18080",
+      wsUrl: "ws://192.168.9.19:18080/ws",
+      appUrl: "http://192.168.9.19:13000",
     });
   });
 
