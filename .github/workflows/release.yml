@@ -378,7 +378,7 @@ jobs:
           - os: macos-14
             target: mac
             arch: arm64
-          - os: macos-13
+          - os: macos-latest
             target: mac
             arch: x64
     runs-on: ${{ matrix.os }}
