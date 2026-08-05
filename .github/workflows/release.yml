@@ -59,12 +59,9 @@ jobs:
 
   release:
     needs: verify
-    # Only run on the canonical upstream repo. Forks don't have the
-    # HOMEBREW_TAP_GITHUB_TOKEN secret and should not be publishing to
-    # `multica-ai/homebrew-tap` anyway. Without this guard, every fork's
-    # tag push fails this job (401 against the upstream tap), which makes
-    # downstream CI go red without affecting the actual artifact pipeline.
-    if: github.repository_owner == 'multica-ai'
+    # Run on this fork. The upstream Homebrew tap publish was removed from
+    # goreleaser.yml, so no HOMEBREW_TAP_GITHUB_TOKEN secret is needed.
+    if: github.repository_owner == 'rockenlee'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
