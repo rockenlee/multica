@@ -15,9 +15,9 @@ export type RuntimeConfigResult =
 
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({
   schemaVersion: 1,
-  apiUrl: "http://192.168.9.19:18080",
-  wsUrl: "ws://192.168.9.19:18080/ws",
-  appUrl: "http://192.168.9.19:13000",
+  apiUrl: "http://multica.ai.huangbaoche.com/api",
+  wsUrl: "ws://multica.ai.huangbaoche.com/ws",
+  appUrl: "http://multica.ai.huangbaoche.com",
 });
 
 const LOCAL_DEV_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({

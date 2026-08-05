@@ -7,12 +7,12 @@ import {
 } from "./runtime-config";
 
 describe("runtime config", () => {
-  it("uses cloud defaults without a desktop.json file", () => {
+  it("uses self-host defaults without a desktop.json file", () => {
     expect(DEFAULT_RUNTIME_CONFIG).toEqual({
       schemaVersion: 1,
-      apiUrl: "http://192.168.9.19:18080",
-      wsUrl: "ws://192.168.9.19:18080/ws",
-      appUrl: "http://192.168.9.19:13000",
+      apiUrl: "http://multica.ai.huangbaoche.com/api",
+      wsUrl: "ws://multica.ai.huangbaoche.com/ws",
+      appUrl: "http://multica.ai.huangbaoche.com",
     });
   });
 
