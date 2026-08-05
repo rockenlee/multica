@@ -10,8 +10,8 @@ describe("runtime config", () => {
   it("uses self-host defaults without a desktop.json file", () => {
     expect(DEFAULT_RUNTIME_CONFIG).toEqual({
       schemaVersion: 1,
-      apiUrl: "http://multica.ai.huangbaoche.com/api",
-      wsUrl: "ws://multica.ai.huangbaoche.com/ws",
+      apiUrl: "http://multica.ai.huangbaoche.com",
+      wsUrl: "ws://multicaapi.ai.huangbaoche.com/ws",
       appUrl: "http://multica.ai.huangbaoche.com",
     });
   });

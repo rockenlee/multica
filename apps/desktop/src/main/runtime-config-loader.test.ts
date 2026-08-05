@@ -46,8 +46,8 @@ describe("loadRuntimeConfig", () => {
       ok: true,
       config: {
         schemaVersion: 1,
-        apiUrl: "http://multica.ai.huangbaoche.com/api",
-        wsUrl: "ws://multica.ai.huangbaoche.com/ws",
+        apiUrl: "http://multica.ai.huangbaoche.com",
+        wsUrl: "ws://multicaapi.ai.huangbaoche.com/ws",
         appUrl: "http://multica.ai.huangbaoche.com",
       },
     });
