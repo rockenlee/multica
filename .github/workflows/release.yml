@@ -365,9 +365,6 @@ jobs:
 
   # Build the Desktop installers for Linux and Windows and upload them to
   # the GitHub Release that the `release` job above just published. macOS
-  # Desktop continues to ship via the manual `release-desktop` skill so it
-  # can be signed + notarized with Apple Developer credentials that are
-  # not (yet) wired into CI.
   desktop:
     needs: release
     strategy:
@@ -378,6 +375,12 @@ jobs:
             target: linux
           - os: windows-latest
             target: win
+          - os: macos-14
+            target: mac
+            arch: arm64
+          - os: macos-13
+            target: mac
+            arch: x64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -413,9 +416,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # electron-builder's GitHub publisher reads this:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Disable code signing on Linux/Windows for now — the public
-          # release is unsigned for these platforms, the CLI carries the
-          # trust boundary. Set CSC_LINK in repo secrets to enable
-          # Windows signing later.
+         # Disable code signing on Linux/Windows for now — the public
+         # release is unsigned for these platforms, the CLI carries the
+         # trust boundary. Set CSC_LINK in repo secrets to enable
+         # Windows signing later.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: node scripts/package.mjs --${{ matrix.target }} --x64 --arm64 --publish always
+        run: node scripts/package.mjs --${{ matrix.target }} ${{ matrix.arch && format('--{0}', matrix.arch) || '--x64 --arm64' }} --publish always
