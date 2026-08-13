@@ -734,6 +734,30 @@ describe("AppConfigSchema cdn_signed drift", () => {
     expect(AppConfigSchema.parse({ server_version: "1.2.3" }).server_version).toBe("1.2.3");
     expect(AppConfigSchema.parse({}).server_version).toBeUndefined();
   });
+
+  it("parses SSO fields from an OIDC-enabled server", () => {
+    const parsed = AppConfigSchema.parse({
+      sso_enabled: true,
+      sso_display_name: "HBC SSO",
+    });
+    expect(parsed.sso_enabled).toBe(true);
+    expect(parsed.sso_display_name).toBe("HBC SSO");
+  });
+
+  it("hides SSO when the server omits the fields (older servers)", () => {
+    const parsed = AppConfigSchema.parse({});
+    expect(parsed.sso_enabled).toBeUndefined();
+    expect(parsed.sso_display_name).toBeUndefined();
+  });
+
+  it("coerces a malformed sso_enabled to false instead of failing the whole config", () => {
+    const parsed = AppConfigSchema.parse({
+      sso_enabled: "yes",
+      cdn_domain: "cdn.example.com",
+    });
+    expect(parsed.sso_enabled).toBe(false);
+    expect(parsed.cdn_domain).toBe("cdn.example.com");
+  });
 });
 
 describe("InboxUnreadSummarySchema", () => {

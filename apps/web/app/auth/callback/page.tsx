@@ -23,6 +23,7 @@ function CallbackContent() {
   const searchParams = useSearchParams();
   const qc = useQueryClient();
   const loginWithGoogle = useAuthStore((s) => s.loginWithGoogle);
+  const loginWithSso = useAuthStore((s) => s.loginWithSso);
   const [error, setError] = useState("");
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
 
@@ -42,6 +43,9 @@ function CallbackContent() {
     const state = searchParams.get("state") || "";
     const stateParts = state.split(",");
     const isDesktop = stateParts.includes("platform:desktop");
+    // Set by the login page when the flow started at GET /auth/sso/login —
+    // the code must be exchanged at the matching endpoint.
+    const isSso = stateParts.includes("provider:sso");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     // Strip "next:" prefix, then drop anything that isn't a safe relative path
     // so an attacker-controlled `state=next:https://evil` cannot redirect here.
@@ -68,11 +72,13 @@ function CallbackContent() {
         ? cliCallbackRaw
         : null;
 
+    const exchangeCode = (c: string, uri: string) =>
+      isSso ? api.ssoLogin(c, uri) : api.googleLogin(c, uri);
+
     if (cliCallback) {
-      // CLI login flow: exchange the Google code for a JWT, then redirect the
+      // CLI login flow: exchange the OAuth code for a JWT, then redirect the
       // token back to the CLI's local HTTP listener (e.g. WSL2 host).
-      api
-        .googleLogin(code, redirectUri)
+      exchangeCode(code, redirectUri)
         .then(({ token }) => {
           redirectToCliCallback(cliCallback, token, cliState);
         })
@@ -81,8 +87,7 @@ function CallbackContent() {
         });
     } else if (isDesktop) {
       // Desktop flow: exchange code for token, then redirect via deep link
-      api
-        .googleLogin(code, redirectUri)
+      exchangeCode(code, redirectUri)
         .then(({ token }) => {
           setDesktopToken(token);
           window.location.href = `multica://auth/callback?token=${encodeURIComponent(token)}`;
@@ -92,7 +97,7 @@ function CallbackContent() {
         });
     } else {
       // Normal web flow
-      loginWithGoogle(code, redirectUri)
+      (isSso ? loginWithSso : loginWithGoogle)(code, redirectUri)
         .then(async (loggedInUser) => {
           const wsList = await api.listWorkspaces();
           qc.setQueryData(workspaceKeys.list(), wsList);
@@ -141,7 +146,7 @@ function CallbackContent() {
           setError(err instanceof Error ? err.message : "Login failed");
         });
     }
-  }, [searchParams, loginWithGoogle, router, qc]);
+  }, [searchParams, loginWithGoogle, loginWithSso, router, qc]);
 
   if (desktopToken) {
     return (

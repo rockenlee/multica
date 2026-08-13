@@ -25,6 +25,12 @@ type AppConfig struct {
 	// toggle signup or wire Google OAuth.
 	AllowSignup    bool   `json:"allow_signup"`
 	GoogleClientID string `json:"google_client_id,omitempty"`
+	// SSOEnabled / SSODisplayName tell the login page to render the generic
+	// OIDC sign-in button. Set from MULTICA_OIDC_* env vars; the issuer and
+	// endpoints stay server-side (the flow starts at GET /auth/sso/login).
+	// Omitted when unconfigured so the response keeps its previous shape.
+	SSOEnabled     bool   `json:"sso_enabled,omitempty"`
+	SSODisplayName string `json:"sso_display_name,omitempty"`
 	// WorkspaceCreationDisabled mirrors the server-side
 	// DISABLE_WORKSPACE_CREATION env var so the UI can hide every
 	// "Create workspace" affordance on self-hosted instances. Omitted
@@ -76,6 +82,10 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		AllowSignup:               os.Getenv("ALLOW_SIGNUP") != "false",
 		GoogleClientID:            os.Getenv("GOOGLE_CLIENT_ID"),
 		WorkspaceCreationDisabled: os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
+	}
+	if oidcConfigured() {
+		config.SSOEnabled = true
+		config.SSODisplayName = oidcDisplayName()
 	}
 	if h.Storage != nil {
 		config.CdnDomain = h.Storage.CdnDomain()

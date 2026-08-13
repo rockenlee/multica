@@ -810,6 +810,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.With(authRL).Post("/auth/send-code", h.SendCode)
 	r.With(authVerifyRL).Post("/auth/verify-code", h.VerifyCode)
 	r.With(authRL).Post("/auth/google", h.GoogleLogin)
+	// Generic OIDC SSO: the GET resolves discovery and 302s to the IdP; the
+	// POST exchanges the code, mirroring /auth/google.
+	r.With(authRL).Get("/auth/sso/login", h.SSOLoginRedirect)
+	r.With(authRL).Post("/auth/sso", h.SSOLogin)
 	r.Post("/auth/logout", h.Logout)
 
 	// Public API

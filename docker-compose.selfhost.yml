@@ -80,6 +80,14 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3000/auth/callback}
+      # Generic OIDC SSO. Configure all three of issuer / client id / client
+      # secret to surface the SSO button on the login page (see .env.example).
+      MULTICA_OIDC_ISSUER: ${MULTICA_OIDC_ISSUER:-}
+      MULTICA_OIDC_CLIENT_ID: ${MULTICA_OIDC_CLIENT_ID:-}
+      MULTICA_OIDC_CLIENT_SECRET: ${MULTICA_OIDC_CLIENT_SECRET:-}
+      MULTICA_OIDC_DISPLAY_NAME: ${MULTICA_OIDC_DISPLAY_NAME:-}
+      MULTICA_OIDC_SCOPES: ${MULTICA_OIDC_SCOPES:-}
+      MULTICA_OIDC_REDIRECT_URI: ${MULTICA_OIDC_REDIRECT_URI:-}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-us-west-2}
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}

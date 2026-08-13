@@ -97,6 +97,30 @@ MULTICA_DEV_VERIFICATION_CODE=888888
 
 Google Console 与 `GOOGLE_REDIRECT_URI` 中的地址必须完全一致，包括协议、端口和结尾斜杠。配置生效后，登录页会出现 Google 登录按钮；前端镜像不需要重新构建。
 
+## SSO（通用 OIDC）
+
+Multica 可以通过任意 OpenID Connect 身份提供方完成登录，例如 Keycloak、Authentik、Azure AD / Entra ID、Okta，或作为企业 IdP 的飞书。
+
+1. 在 IdP 上注册一个使用授权码模式的机密 OAuth client，回调地址填写：
+
+   ```text
+   https://multica.example.com/auth/callback
+   ```
+
+2. 设置：
+
+   ```dotenv
+   MULTICA_OIDC_ISSUER=https://idp.example.com/realms/main
+   MULTICA_OIDC_CLIENT_ID=multica
+   MULTICA_OIDC_CLIENT_SECRET=xxxxxxxxxxxxxxx
+   # 可选的按钮文案，默认显示 "SSO"
+   MULTICA_OIDC_DISPLAY_NAME=Acme SSO
+   ```
+
+3. 重启 API 服务。
+
+issuer 地址必须能通过 `<issuer>/.well-known/openid-configuration` 提供发现文档，且 IdP 必须返回邮箱 claim（默认请求 `openid email profile` scope，可用 `MULTICA_OIDC_SCOPES` 覆盖）。账号按邮箱匹配：之前用邮箱验证码登录的用户切换到 SSO 后仍是同一个账号。下方的注册范围控制同样作用于首次 SSO 登录。配置生效后，登录页会出现 SSO 登录按钮；前端镜像不需要重新构建。
+
 ## 注册范围控制
 
 三个变量共同决定新账号能否创建：

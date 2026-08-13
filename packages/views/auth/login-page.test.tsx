@@ -66,6 +66,7 @@ vi.mock("@multica/core/api", () => ({
     setToken: mockApiSetToken,
     getMe: mockApiGetMe,
     issueCliToken: mockApiIssueCliToken,
+    getBaseUrl: () => "http://api.test",
   },
 }));
 
@@ -403,6 +404,52 @@ describe("LoginPage", () => {
     renderWithI18n(<LoginPage onSuccess={onSuccess} />);
     expect(
       screen.queryByRole("button", { name: /continue with google/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Generic OIDC SSO
+  // -------------------------------------------------------------------------
+
+  it("renders the SSO button labelled with the configured display name", () => {
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        sso={{ displayName: "HBC SSO", state: "provider:sso" }}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /continue with hbc sso/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the SSO button when only onSsoLogin is provided (desktop)", () => {
+    renderWithI18n(<LoginPage onSuccess={onSuccess} onSsoLogin={() => {}} />);
+    expect(
+      screen.getByRole("button", { name: /continue with sso/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("prefers the onSsoLogin override over the redirect flow", async () => {
+    const onSsoLogin = vi.fn();
+    const user = userEvent.setup();
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        sso={{ displayName: "HBC SSO" }}
+        onSsoLogin={onSsoLogin}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /continue with hbc sso/i }),
+    );
+    expect(onSsoLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the SSO button when neither sso config nor override is provided", () => {
+    renderWithI18n(<LoginPage onSuccess={onSuccess} />);
+    expect(
+      screen.queryByRole("button", { name: /continue with sso/i }),
     ).not.toBeInTheDocument();
   });
 

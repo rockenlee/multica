@@ -90,6 +90,12 @@ SMTP takes priority over Resend whenever `SMTP_HOST` is non-empty.
 | `GOOGLE_CLIENT_ID` | empty | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | empty | Google OAuth client secret |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:3000/auth/callback` | Must exactly match the callback URL in the Google Console |
+| `MULTICA_OIDC_ISSUER` | empty | OIDC issuer URL for generic SSO; discovery is read from `<issuer>/.well-known/openid-configuration` |
+| `MULTICA_OIDC_CLIENT_ID` | empty | OIDC client ID; SSO activates only when issuer, client ID, and secret are all set |
+| `MULTICA_OIDC_CLIENT_SECRET` | empty | OIDC client secret |
+| `MULTICA_OIDC_DISPLAY_NAME` | `SSO` | Label on the login page's SSO button |
+| `MULTICA_OIDC_SCOPES` | `openid email profile` | Scopes requested from the IdP |
+| `MULTICA_OIDC_REDIRECT_URI` | `${FRONTEND_ORIGIN}/auth/callback` | Redirect URI registered at the IdP |
 
 ### Signup scope
 

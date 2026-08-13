@@ -18,6 +18,7 @@ import {
   InputOTPGroup,
   InputOTPSlot,
 } from "@multica/ui/components/ui/input-otp";
+import { KeyRound } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
@@ -32,6 +33,14 @@ interface GoogleAuthConfig {
   clientId: string;
   redirectUri: string;
   /** Opaque state passed through Google OAuth (e.g. "platform:desktop"). */
+  state?: string;
+}
+
+interface SsoAuthConfig {
+  /** Button label from /api/config sso_display_name (e.g. "HBC SSO"). */
+  displayName: string;
+  /** Opaque state round-tripped through the IdP. Must include "provider:sso"
+   *  so the /auth/callback page exchanges the code at POST /auth/sso. */
   state?: string;
 }
 
@@ -50,12 +59,16 @@ interface LoginPageProps {
   onSuccess: () => void;
   /** Google OAuth config. Omit to disable Google login. */
   google?: GoogleAuthConfig;
+  /** Generic OIDC SSO config. Omit to disable the SSO button. */
+  sso?: SsoAuthConfig;
   /** CLI callback config for authorizing CLI tools. */
   cliCallback?: CliCallbackConfig;
   /** Called after a token is obtained (e.g. to set cookies). */
   onTokenObtained?: () => void;
   /** Override Google login handler (e.g. desktop opens browser externally). When provided, renders the Google button even if `google` config is omitted. */
   onGoogleLogin?: () => void;
+  /** Override SSO login handler (e.g. desktop opens browser externally). When provided, renders the SSO button even if `sso` config is omitted. */
+  onSsoLogin?: () => void;
   /** Slot rendered at the bottom of the sign-in card, below the
    *  Google button. The web shell uses it for a "Prefer the desktop
    *  app?" prompt; desktop omits it (a download prompt inside the app
@@ -101,9 +114,11 @@ export function LoginPage({
   logo,
   onSuccess,
   google,
+  sso,
   cliCallback,
   onTokenObtained,
   onGoogleLogin,
+  onSsoLogin,
   extra,
 }: LoginPageProps) {
   const { t } = useT("auth");
@@ -284,6 +299,19 @@ export function LoginPage({
     });
     if (google.state) params.set("state", google.state);
     window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+  };
+
+  const handleSsoLogin = () => {
+    if (onSsoLogin) {
+      onSsoLogin();
+      return;
+    }
+    if (!sso) return;
+    // The authorization endpoint comes from OIDC discovery, so the flow
+    // starts server-side: GET /auth/sso/login resolves it and 302s to the
+    // IdP, relaying the opaque state like the Google flow does.
+    const suffix = sso.state ? `?state=${encodeURIComponent(sso.state)}` : "";
+    window.location.href = `${api.getBaseUrl()}/auth/sso/login${suffix}`;
   };
 
   // -------------------------------------------------------------------------
@@ -477,6 +505,19 @@ export function LoginPage({
                 />
               </svg>
               {t(($) => $.signin.google)}
+            </Button>
+          )}
+          {(sso || onSsoLogin) && (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              size="lg"
+              onClick={handleSsoLogin}
+              disabled={loading}
+            >
+              <KeyRound className="mr-2 h-4 w-4" />
+              {t(($) => $.signin.sso, { name: sso?.displayName || "SSO" })}
             </Button>
           )}
           {extra && <div className="w-full pt-1 text-center">{extra}</div>}

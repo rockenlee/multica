@@ -97,6 +97,30 @@ Do not enable a fixed code on a publicly reachable instance. The production comb
 
 The URLs in the Google Console and in `GOOGLE_REDIRECT_URI` must match exactly, including protocol, port, and trailing slash. Once configured, the sign-in page shows a Google sign-in button; the frontend image needs no rebuild.
 
+## SSO (generic OIDC)
+
+Multica can sign users in through any OpenID Connect provider — Keycloak, Authentik, Azure AD / Entra ID, Okta, or Feishu acting as an enterprise IdP.
+
+1. Register a confidential OAuth client at your IdP with the authorization code grant and the redirect URI:
+
+   ```text
+   https://multica.example.com/auth/callback
+   ```
+
+2. Set:
+
+   ```dotenv
+   MULTICA_OIDC_ISSUER=https://idp.example.com/realms/main
+   MULTICA_OIDC_CLIENT_ID=multica
+   MULTICA_OIDC_CLIENT_SECRET=xxxxxxxxxxxxxxx
+   # Optional button label; defaults to "SSO"
+   MULTICA_OIDC_DISPLAY_NAME=Acme SSO
+   ```
+
+3. Restart the API service.
+
+The issuer must serve a discovery document at `<issuer>/.well-known/openid-configuration`, and the IdP must release an email claim (`openid email profile` scopes are requested by default; override with `MULTICA_OIDC_SCOPES`). Accounts are matched by email, so a user who previously signed in with an email code keeps the same account when switching to SSO. Signup restrictions below apply to first-time SSO logins too. Once configured, the sign-in page shows the SSO button; the frontend image needs no rebuild.
+
 ## Signup restrictions
 
 Three variables together decide whether a new account can be created:

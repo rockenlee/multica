@@ -61,6 +61,8 @@ function LoginPageContent() {
   const qc = useQueryClient();
   const { t } = useT("auth");
   const googleClientId = useConfigStore((state) => state.googleClientId);
+  const ssoEnabled = useConfigStore((state) => state.ssoEnabled);
+  const ssoDisplayName = useConfigStore((state) => state.ssoDisplayName);
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
   const searchParams = useSearchParams();
@@ -154,16 +156,18 @@ function LoginPageContent() {
   // CLI callback/state must survive the Google OAuth round-trip so the
   // post-login callback page can redirect the JWT back to the CLI's local
   // HTTP listener (critical for headless / WSL2 environments).
-  const googleState = [
+  const oauthStateParts = [
     platform === "desktop" ? "platform:desktop" : "",
     nextUrl ? `next:${nextUrl}` : "",
     cliCallbackRaw && validateCliCallback(cliCallbackRaw)
       ? `cli_callback:${encodeURIComponent(cliCallbackRaw)}`
       : "",
     cliState ? `cli_state:${encodeURIComponent(cliState)}` : "",
-  ]
-    .filter(Boolean)
-    .join(",") || undefined;
+  ].filter(Boolean);
+  const googleState = oauthStateParts.join(",") || undefined;
+  // provider:sso routes the shared /auth/callback page to POST /auth/sso
+  // instead of POST /auth/google when exchanging the code.
+  const ssoState = [...oauthStateParts, "provider:sso"].join(",");
 
   // While the desktop handoff is in progress (or has produced a token/error),
   // render a dedicated screen instead of flashing the login form or redirecting
@@ -225,6 +229,11 @@ function LoginPageContent() {
               redirectUri: `${window.location.origin}/auth/callback`,
               state: googleState,
             }
+          : undefined
+      }
+      sso={
+        ssoEnabled === true
+          ? { displayName: ssoDisplayName || "SSO", state: ssoState }
           : undefined
       }
       cliCallback={
