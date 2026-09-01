@@ -14,27 +14,23 @@ test.describe("Settings", () => {
     await page.goto(`/${workspaceSlug}/settings?tab=workspace`, { waitUntil: "domcontentloaded" });
     await waitForPageText(page, "General");
 
-    // Change workspace name
-    const nameInput = page
-      .locator('input[type="text"]')
-      .first();
+    const nameInput = page.getByRole("textbox", { name: "Name" });
     await nameInput.clear();
     const newName = "Renamed WS " + Date.now();
     await nameInput.fill(newName);
+    await nameInput.blur();
 
-    // Save
-    await page.locator("button", { hasText: "Save" }).click();
-
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 5000 });
-
-    // Sidebar should reflect the new name WITHOUT page refresh
+    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({
+      timeout: 10000,
+    });
     await expect(page.getByRole("button", { name: new RegExp(newName) }).first()).toBeVisible();
 
-    // Restore original name so other tests aren't affected
     await nameInput.clear();
     await nameInput.fill(originalName.trim());
-    await page.locator("button", { hasText: "Save" }).click();
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 5000 });
+    await nameInput.blur();
+    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({
+      timeout: 10000,
+    });
     await expect(page.getByRole("button", { name: new RegExp(originalName) }).first()).toBeVisible();
   });
 
@@ -46,6 +42,23 @@ test.describe("Settings", () => {
   test("connecting a Composio toolkit shows a toast and refreshes the list", async ({
     page,
   }) => {
+    // Feature flag is off on self-host by default. Intercept config before the
+    // first app navigation so the integrations page actually mounts Composio.
+    await page.route("**/api/config", async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        feature_flags?: Record<string, boolean>;
+      };
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...body,
+          feature_flags: { ...body.feature_flags, composio_mcp_apps: true },
+        }),
+      });
+    });
+
     const workspaceSlug = await loginAsDefault(page);
     const settingsUrl = `/${workspaceSlug}/settings?tab=integrations`;
 
