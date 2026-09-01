@@ -88,10 +88,22 @@ export interface GitLabRepoResourceRef {
   default_branch_hint?: string;
 }
 
+/**
+ * How tasks sharing one local directory are executed.
+ *
+ * - `in_place`: the agent works directly in the user's directory and tasks run
+ *   one at a time. Edits land in the user's working copy.
+ * - `worktree`: each task gets its own git worktree and can run concurrently.
+ *
+ * Absent means `in_place`.
+ */
+export type LocalDirectoryExecutionMode = "in_place" | "worktree";
+
 export interface LocalDirectoryResourceRef {
   local_path: string;
   daemon_id: string;
   label?: string;
+  execution_mode?: LocalDirectoryExecutionMode;
 }
 
 export interface FeishuDriveResourceRef {

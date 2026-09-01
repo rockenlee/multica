@@ -1,4 +1,5 @@
 import {
+  hasCompleteAssetSet,
   parseReleaseAssets,
   type DownloadAssets,
 } from "./parse-release-assets";
@@ -8,19 +9,20 @@ import {
 } from "./download-source";
 
 /**
- * Server-side fetcher for the latest Multica release, designed to
- * run inside a Next.js server component. Response is cached by the
- * Next.js fetch cache for 5 minutes (Vercel ISR) so hitting /download
- * costs at most one GitHub API call per region per 5 minutes.
+ * Server-side fetcher for the latest downloadable Multica release,
+ * designed to run inside a Next.js server component. Response is cached
+ * by the Next.js fetch cache for 5 minutes (Vercel ISR) so hitting
+ * /download costs at most one GitHub API call per region per 5 minutes.
  *
- * Desktop assets don't all land at the same time: CI uploads Linux
- * and Windows within a minute of each other, but macOS is packaged
- * manually (notarization credentials aren't wired into CI yet) and
- * lands tens of minutes later. To avoid showing the half-filled
- * mid-flight state on /download, the fetcher pulls the two most
- * recent releases and falls back to the previous one for the first
- * hour after publish. Empirically full desktop uploads complete in
- * ~20 min; 1 h gives 3x buffer for commonly-variable manual steps.
+ * Desktop assets don't all land at the same time: CI uploads Linux and
+ * Windows within a minute of each other, but macOS is packaged manually
+ * (notarization credentials aren't wired into CI yet) and lands tens of
+ * minutes later. A packaging job can also fail outright and leave a
+ * release permanently short of some platforms. Either way the newest
+ * release is not always the newest *downloadable* one, so we pull a
+ * short window of recent releases and show the newest whose desktop
+ * asset set is complete — every button on the page then resolves to a
+ * real file.
  *
  * On any failure (network, rate limit, malformed payload) returns a
  * `null`-shaped result and logs — the page degrades to a "version
@@ -34,9 +36,11 @@ export interface LatestRelease {
   assets: DownloadAssets;
 }
 
+// Five candidates tolerates four consecutive incomplete releases before
+// the page has to fall back to showing the newest one as-is. Releases
+// ship roughly daily, so that is days of head room — while staying one
+// cheap request.
 const REVALIDATE_SECONDS = 300;
-
-const FRESH_RELEASE_WINDOW_MS = 60 * 60 * 1000;
 
 interface GitHubReleasePayload {
   tag_name?: string;
@@ -66,7 +70,7 @@ export async function fetchLatestRelease(
   }
 
   try {
-    const res = await fetch(githubReleasesApiUrl(releaseRepo), {
+    const res = await fetch(githubReleasesApiUrl(releaseRepo, 5), {
       next: { revalidate: REVALIDATE_SECONDS },
       headers,
     });
@@ -80,19 +84,16 @@ export async function fetchLatestRelease(
     // prerelease shadowing a stable version on /download would be a
     // regression.
     const stable = data.filter((r) => !r.prerelease && !r.draft);
-    const latest = stable[0];
-    if (!latest) {
+    const chosen = pickRelease(stable);
+    if (!chosen) {
       return emptyRelease();
     }
-    const previous = stable[1];
-    const chosen =
-      previous && isWithinFreshWindow(latest) ? previous : latest;
 
     return {
-      version: chosen.tag_name ?? null,
-      publishedAt: chosen.published_at ?? null,
-      htmlUrl: chosen.html_url ?? null,
-      assets: parseReleaseAssets(chosen.assets ?? []),
+      version: chosen.release.tag_name ?? null,
+      publishedAt: chosen.release.published_at ?? null,
+      htmlUrl: chosen.release.html_url ?? null,
+      assets: chosen.assets,
     };
   } catch (err) {
     console.warn("[download] fetchLatestRelease failed:", err);
@@ -100,11 +101,38 @@ export async function fetchLatestRelease(
   }
 }
 
-function isWithinFreshWindow(release: GitHubReleasePayload): boolean {
-  if (!release.published_at) return false;
-  const publishedAt = Date.parse(release.published_at);
-  if (Number.isNaN(publishedAt)) return false;
-  return Date.now() - publishedAt < FRESH_RELEASE_WINDOW_MS;
+interface PickedRelease {
+  release: GitHubReleasePayload;
+  assets: DownloadAssets;
+}
+
+/**
+ * Newest release whose desktop assets are all present. Falls back to the
+ * newest release overall when no candidate is complete — the page then
+ * shows what does exist plus its "all releases" escape hatch, which
+ * still beats reporting no version at all.
+ */
+function pickRelease(
+  candidates: GitHubReleasePayload[],
+): PickedRelease | undefined {
+  const parsed = candidates.map((release) => ({
+    release,
+    assets: parseReleaseAssets(release.assets ?? []),
+  }));
+
+  const complete = parsed.find((c) => hasCompleteAssetSet(c.assets));
+  if (complete) {
+    if (complete !== parsed[0]) {
+      // Worth a line in the logs: a release that never completes its
+      // asset set is invisible on /download until someone notices.
+      console.warn(
+        `[download] skipping ${parsed[0]?.release.tag_name ?? "latest release"}` +
+          ` — incomplete desktop assets; showing ${complete.release.tag_name}`,
+      );
+    }
+    return complete;
+  }
+  return parsed[0];
 }
 
 function emptyRelease(): LatestRelease {

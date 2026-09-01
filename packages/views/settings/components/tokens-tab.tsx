@@ -54,6 +54,7 @@ import {
   ConnectionStatusBadge,
   type ConnectionStatus,
 } from "./connection-status";
+import { useLocale, useT } from "../../i18n";
 import { SettingsSection, SettingsTab } from "./settings-layout";
 
 const EXPIRY_KEYS = ["30", "90", "365", "never"] as const;
@@ -128,6 +129,7 @@ function visibleExternalAccountsByConnection(
 }
 export function TokensTab() {
   const { t } = useT("settings");
+  const locale = useLocale();
   const expiryItems = EXPIRY_KEYS.map((value) => ({
     value,
     label: t(($) => $.tokens.expiry[value]),
@@ -289,15 +291,15 @@ export function TokensTab() {
                     <div className="text-caption text-muted-foreground">
                       {t(($) => $.tokens.metadata_prefix, {
                         prefix: token.token_prefix,
-                        created: new Date(token.created_at).toLocaleDateString(),
+                        created: new Date(token.created_at).toLocaleDateString(locale),
                         lastUsed: token.last_used_at
                           ? t(($) => $.tokens.last_used_with_date, {
-                              date: new Date(token.last_used_at!).toLocaleDateString(),
+                              date: new Date(token.last_used_at!).toLocaleDateString(locale),
                             })
                           : t(($) => $.tokens.last_used_never),
                       })}
                       {token.expires_at && t(($) => $.tokens.expires_with_date, {
-                        date: new Date(token.expires_at!).toLocaleDateString(),
+                        date: new Date(token.expires_at!).toLocaleDateString(locale),
                       })}
                     </div>
                   </div>

@@ -19,6 +19,10 @@ import { LarkTab } from "./lark-tab";
 import { ComposioTab } from "./composio-tab";
 import { SlackTab } from "./slack-tab";
 import { VCSTab } from "./vcs-tab";
+import { DingTalkTab } from "./dingtalk-tab";
+import { WecomTab } from "./wecom-tab";
+import { TelegramTab } from "./telegram-tab";
+import { IntegrationChannelIcon } from "./integration-channel-icon";
 import { api, ApiError } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { integrationsOptions, integrationKeys } from "@multica/core/integrations";
@@ -104,6 +108,39 @@ export function IntegrationsTab() {
           <VCSTab />
         </SettingsSection>
       )}
+      <SettingsSection
+        title={
+          <span className="flex items-center gap-2">
+            <IntegrationChannelIcon channel="dingtalk" />
+            {t(($) => $.dingtalk.section_title)}
+          </span>
+        }
+        description={t(($) => $.dingtalk.page_description)}
+      >
+        <DingTalkTab />
+      </SettingsSection>
+      <SettingsSection
+        title={
+          <span className="flex items-center gap-2">
+            <IntegrationChannelIcon channel="wecom" />
+            {t(($) => $.wecom.section_title)}
+          </span>
+        }
+        description={t(($) => $.wecom.page_description)}
+      >
+        <WecomTab />
+      </SettingsSection>
+      <SettingsSection
+        title={
+          <span className="flex items-center gap-2">
+            <IntegrationChannelIcon channel="telegram" />
+            {t(($) => $.telegram.section_title)}
+          </span>
+        }
+        description={t(($) => $.telegram.page_description)}
+      >
+        <TelegramTab />
+      </SettingsSection>
     </SettingsTab>
   );
 }

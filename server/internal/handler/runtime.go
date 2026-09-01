@@ -13,6 +13,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -35,9 +37,9 @@ type AgentRuntimeResponse struct {
 	DeviceInfo   string  `json:"device_info"`
 	Metadata     any     `json:"metadata"`
 	OwnerID      *string `json:"owner_id"`
-	// Visibility is "private" (default — only the owner / workspace admins
-	// can bind agents) or "public" (any workspace member can). See migration
-	// 083 and canUseRuntimeForAgent.
+	// Visibility is "private" (default — only the owner can bind agents) or
+	// "public" (any workspace member can). See migration 083 and
+	// canUseRuntimeForAgent.
 	Visibility string `json:"visibility"`
 	// ProfileID is set when this runtime is an instance of a custom
 	// runtime_profile (MUL-3284); null for built-in runtimes.
@@ -108,18 +110,8 @@ type RuntimeUsageResponse struct {
 // same tool).
 func (h *Handler) GetRuntimeUsage(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
-	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
+	rt, _, ok := h.requireRuntimeReadAccess(w, r, obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeID)
 	if !ok {
-		return
-	}
-
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "runtime not found")
-		return
-	}
-
-	if _, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found"); !ok {
 		return
 	}
 
@@ -172,18 +164,8 @@ func (h *Handler) listRuntimeUsage(ctx context.Context, runtimeID pgtype.UUID, t
 // GetRuntimeTaskActivity returns hourly task activity distribution for a runtime.
 func (h *Handler) GetRuntimeTaskActivity(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
-	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
+	rt, _, ok := h.requireRuntimeReadAccess(w, r, obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeID)
 	if !ok {
-		return
-	}
-
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "runtime not found")
-		return
-	}
-
-	if _, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found"); !ok {
 		return
 	}
 
@@ -240,18 +222,8 @@ type RuntimeUsageByAgentResponse struct {
 // since the cutoff window. Drives the runtime-detail "Cost by agent" tab.
 func (h *Handler) GetRuntimeUsageByAgent(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
-	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
+	rt, _, ok := h.requireRuntimeReadAccess(w, r, obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeID)
 	if !ok {
-		return
-	}
-
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "runtime not found")
-		return
-	}
-
-	if _, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found"); !ok {
 		return
 	}
 
@@ -322,18 +294,8 @@ type RuntimeUsageByHourResponse struct {
 // `?tz=` param or the authenticated user's stored user.timezone.
 func (h *Handler) GetRuntimeUsageByHour(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
-	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
+	rt, _, ok := h.requireRuntimeReadAccess(w, r, obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeID)
 	if !ok {
-		return
-	}
-
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "runtime not found")
-		return
-	}
-
-	if _, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found"); !ok {
 		return
 	}
 
@@ -420,6 +382,16 @@ func parseExactSinceParamInTZ(r *http.Request, defaultDays int, tzName string) p
 // parseDaysCutoff is the shared body of the two cutoff parsers. `trimDays`
 // pulls the cutoff forward, so 0 keeps the N+1 headroom and 1 closes the
 // window to exactly N calendar days.
+// dayWindowNow is the clock every `days=N` cutoff reads.
+//
+// A variable so a test can pin it. Without one, a fixture and the cutoff that
+// has to contain it read the wall clock at two different moments — the fixture
+// when it is built, the cutoff when the request is handled, with inserts and a
+// rollup in between. A suite that crosses midnight in that gap builds its run
+// in one day and then asks for the next day's window, and the row it just
+// wrote is excluded. Production always reads the real clock.
+var dayWindowNow = time.Now
+
 func parseDaysCutoff(
 	r *http.Request,
 	defaultDays int,
@@ -440,7 +412,7 @@ func parseDaysCutoff(
 	// window by one would put the cutoff at start-of-today+0 — still correct
 	// ("today only"), which is exactly what days=1 means.
 	return pgtype.Timestamptz{
-		Time:  sinceFromDays(time.Now(), days-trimDays, loc),
+		Time:  sinceFromDays(dayWindowNow(), days-trimDays, loc),
 		Valid: true,
 	}
 }
@@ -488,8 +460,9 @@ func (h *Handler) resolveViewingTZ(r *http.Request) string {
 // (provider, daemon_id, status…) flows in from the daemon and is read-only here.
 type UpdateAgentRuntimeRequest struct {
 	// Visibility flips a runtime between "private" (default — only the owner
-	// or workspace admins can bind agents) and "public" (any workspace
-	// member can). Owner / workspace admin only, gated by canEditRuntime.
+	// can bind agents) and "public" (any workspace member can). Runtime owner
+	// only, gated by canSetRuntimeVisibility — narrower than the rest of this
+	// request, which admins may also send.
 	Visibility *string `json:"visibility,omitempty"`
 	// CustomName sets or clears a user-facing display override (MUL-4217).
 	// An empty / whitespace-only string clears it (revert to the
@@ -510,7 +483,8 @@ const maxRuntimeCustomNameLen = 100
 // UpdateAgentRuntime handles PATCH /api/runtimes/:id. Currently visibility
 // is editable; the request shape is open-ended so future fields (display
 // name, description) can be added without a route change.
-// Workspace-membership-checked; write access is gated by canEditRuntime.
+// Workspace-membership-checked; write access is gated by canEditRuntime, and
+// `visibility` carries the narrower owner-only gate on top (MUL-6126).
 func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
@@ -518,7 +492,7 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
+	rt, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "runtime not found")
 		return
@@ -551,7 +525,16 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "visibility must be 'private' or 'public'")
 			return
 		}
+		// Only a real change is gated. An admin renaming a runtime through a
+		// PATCH-as-PUT client that echoes the unchanged visibility back is not
+		// trying to share anyone's machine, so that no-op is dropped rather
+		// than turned into a 403 — same tolerance UpdateAgent applies to
+		// resubmitted agent permissions.
 		if v != rt.Visibility {
+			if !canSetRuntimeVisibility(member, rt) {
+				writeError(w, http.StatusForbidden, "only the runtime owner can change its visibility")
+				return
+			}
 			newVisibility = v
 			needVisibility = true
 		}
@@ -648,6 +631,56 @@ func canEditRuntime(member db.Member, rt db.AgentRuntime) bool {
 	return rt.OwnerID.Valid && uuidToString(rt.OwnerID) == uuidToString(member.UserID)
 }
 
+// getAgentRuntime reads one agent_runtime row by id and attributes the read to
+// source, which labels multica_agent_runtime_lookup_total (MUL-6884). Pick the
+// obsmetrics.RuntimeLookupSource* constant that names the product behaviour
+// driving the read, not the file the call happens to live in: a poll loop
+// counted as generic API traffic is exactly the confusion the metric exists to
+// remove.
+func (h *Handler) getAgentRuntime(ctx context.Context, source string, id pgtype.UUID) (db.AgentRuntime, error) {
+	return h.runtimeLookup(source).Get(ctx, id)
+}
+
+// runtimeLookup is the same reader, unexecuted, for handlers that hand it to a
+// shared readiness helper instead of reading the row themselves.
+func (h *Handler) runtimeLookup(source string) service.RuntimeLookup {
+	return service.RuntimeLookup{Queries: h.Queries, Metrics: h.Metrics, Source: source}
+}
+
+// requireRuntimeReadAccess protects runtime data and machine-triggering
+// capabilities. Governance access is deliberately separate: workspace owners
+// and admins may list, rename, or delete another member's private runtime,
+// but a private machine is readable or usable only by its owner. Returning
+// 404 for that case prevents a known runtime ID from becoming an oracle.
+//
+// source names the product behaviour behind the read for
+// multica_agent_runtime_lookup_total (MUL-6884). It matters here more than
+// anywhere else: this one gate serves both a rarely-opened usage tab and
+// several 500ms browser poll loops, and counting them together would hide the
+// polling the metric exists to measure.
+func (h *Handler) requireRuntimeReadAccess(w http.ResponseWriter, r *http.Request, source, runtimeID string) (db.AgentRuntime, db.Member, bool) {
+	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
+	if !ok {
+		return db.AgentRuntime{}, db.Member{}, false
+	}
+
+	rt, err := h.getAgentRuntime(r.Context(), source, runtimeUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "runtime not found")
+		return db.AgentRuntime{}, db.Member{}, false
+	}
+
+	member, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found")
+	if !ok || !canUseRuntimeForAgent(member, rt) {
+		if ok {
+			writeError(w, http.StatusNotFound, "runtime not found")
+		}
+		return db.AgentRuntime{}, db.Member{}, false
+	}
+
+	return rt, member, true
+}
+
 func (h *Handler) runtimeHasLiveProfile(ctx context.Context, rt db.AgentRuntime) (bool, error) {
 	if !rt.ProfileID.Valid {
 		return false, nil
@@ -666,38 +699,71 @@ func (h *Handler) runtimeHasLiveProfile(ctx context.Context, rt db.AgentRuntime)
 
 // canUseRuntimeForAgent reports whether a workspace member is allowed to
 // bind a new agent to — or move an existing agent onto — the given runtime.
-// Mirrors canEditRuntime but layers on the runtime's visibility flag so a
-// `public` runtime is usable by anyone in the workspace while a `private`
-// runtime stays bound to its owner. Workspace owners/admins keep an
-// administrative override for both. See migration 083 for the visibility
-// column.
+// A `public` runtime is usable by anyone in the workspace; a `private` one is
+// usable only by its owner, with NO workspace owner/admin override (MUL-6126):
+// a private runtime is someone's own machine, and running an agent on it
+// spends their credentials and their local files, which is not an
+// administrative decision. Sharing it is the owner's call, which is why
+// canSetRuntimeVisibility is owner-only too — otherwise an admin would keep
+// the same override with one extra step.
+//
+// An ownerless runtime is refused whatever its visibility: task claim needs an
+// owner to mint the agent's task token and cancels the task without one
+// (MUL-3292), so binding to one only produces agents that fail at run time.
+//
+// This is the same rule the clients enforce (`isRuntimeUsableForUser` in
+// packages/core/runtimes/access.ts), so UI, API and CLI agree. See migration
+// 083 for the visibility column.
 func canUseRuntimeForAgent(member db.Member, rt db.AgentRuntime) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
-		return true
+	if !rt.OwnerID.Valid {
+		return false
 	}
 	if rt.Visibility == "public" {
 		return true
 	}
+	return uuidToString(rt.OwnerID) == uuidToString(member.UserID)
+}
+
+// canSetRuntimeVisibility reports whether a member may flip this runtime
+// between `private` and `public`. Owner-only, and deliberately narrower than
+// canEditRuntime: visibility is the owner's consent to lend their machine to
+// the workspace, so an admin who could flip it would still hold the override
+// canUseRuntimeForAgent removed. Admins keep canEditRuntime for the
+// organisational actions — rename, delete — that do not hand anyone else's
+// credentials out.
+func canSetRuntimeVisibility(member db.Member, rt db.AgentRuntime) bool {
 	return rt.OwnerID.Valid && uuidToString(rt.OwnerID) == uuidToString(member.UserID)
 }
 
 func (h *Handler) ListAgentRuntimes(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	member, ok := h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
+	if !ok {
+		return
+	}
 
 	var runtimes []db.AgentRuntime
 	var err error
 
 	if ownerFilter := r.URL.Query().Get("owner"); ownerFilter == "me" {
-		userID, ok := requireUserID(w, r)
-		if !ok {
-			return
-		}
 		runtimes, err = h.Queries.ListAgentRuntimesByOwner(r.Context(), db.ListAgentRuntimesByOwnerParams{
 			WorkspaceID: parseUUID(workspaceID),
 			OwnerID:     parseUUID(userID),
 		})
-	} else {
+	} else if roleAllowed(member.Role, "owner", "admin") {
+		// Governance visibility preserves the existing owner/admin contract:
+		// admins can find a private runtime to rename or delete it, but the
+		// per-runtime read gate still denies data and machine access.
 		runtimes, err = h.Queries.ListAgentRuntimes(r.Context(), parseUUID(workspaceID))
+	} else {
+		runtimes, err = h.Queries.ListVisibleAgentRuntimes(r.Context(), db.ListVisibleAgentRuntimesParams{
+			WorkspaceID: parseUUID(workspaceID),
+			OwnerID:     parseUUID(userID),
+		})
 	}
 
 	if err != nil {
@@ -718,9 +784,46 @@ func (h *Handler) ListAgentRuntimes(w http.ResponseWriter, r *http.Request) {
 // The strict variant: refuses with 409 + structured `runtime_has_active_agents`
 // when any non-archived agent is still bound to the runtime, and returns the
 // blocking agent list in the response body so the front-end can pivot to the
-// cascade dialog without an extra round-trip. The cascade itself lives at
-// POST /api/runtimes/:id/archive-agents-and-delete (ArchiveAgentsAndDeleteRuntime
+// confirm dialog without an extra round-trip. The confirmed variant lives at
+// POST /api/runtimes/:id/unbind-agents-and-delete (UnbindAgentsAndDeleteRuntime
 // below) and runs the multi-write teardown inside a single transaction.
+// PublishRuntimeTeardown fans out a committed teardown. The caller controls
+// actor metadata and whether to append a runtime-list refresh so automatic GC
+// can deduplicate that refresh once per workspace and batch.
+func (h *Handler) PublishRuntimeTeardown(ctx context.Context, res service.RuntimeTeardownResult, wsID, actorType, actorID, action string, publishRuntimeRefresh bool) {
+	if h.TaskService != nil && len(res.CancelledTasks) > 0 {
+		// The teardown deletes the runtime's system agents, and a system agent's
+		// chat sessions go with it, so the workspace of a cancelled chat task is
+		// no longer resolvable from the task row. It is this workspace.
+		h.TaskService.BroadcastCancelledTasks(ctx, wsID, res.CancelledTasks)
+	}
+	for _, a := range res.UnboundAgents {
+		// agent:status is the generic "this agent changed" broadcast the agent
+		// update path already uses; subscribers refresh the row and see
+		// runtime_bound=false. No agent:archived here — nothing was archived.
+		h.publish(protocol.EventAgentStatus, wsID, actorType, actorID, map[string]any{
+			"agent": broadcastAgentResponse(h.agentToResponse(a)),
+		})
+	}
+	for _, a := range res.PausedAutopilots {
+		h.publish(protocol.EventAutopilotUpdated, wsID, actorType, actorID, map[string]any{
+			"autopilot": autopilotToResponse(a, nil),
+		})
+	}
+	if publishRuntimeRefresh {
+		h.PublishRuntimeRefresh(wsID, actorType, actorID, action)
+	}
+}
+
+// PublishRuntimeRefresh asks connected clients to refetch runtime state.
+func (h *Handler) PublishRuntimeRefresh(wsID, actorType, actorID, action string) {
+	h.publish(protocol.EventDaemonRegister, wsID, actorType, actorID, map[string]any{"action": action})
+}
+
+func (h *Handler) publishRuntimeTeardown(ctx context.Context, res service.RuntimeTeardownResult, wsID, userID string) {
+	h.PublishRuntimeTeardown(ctx, res, wsID, "member", userID, "delete", true)
+}
+
 func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
@@ -728,7 +831,7 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
+	rt, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "runtime not found")
 		return
@@ -776,20 +879,12 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to check runtime dependencies")
 		return
 	}
+	// Refuse before any teardown-side effects while active agents are still
+	// bound. The user confirms the plan through
+	// POST /runtimes/:id/unbind-agents-and-delete, which reuses the same
+	// teardown once the confirmed set is verified.
 	if len(activeAgents) > 0 {
 		writeJSON(w, http.StatusConflict, h.runtimeHasActiveAgentsResponse(activeAgents))
-		return
-	}
-
-	// Refuse before any teardown-side effects if the runtime still has active
-	// squads whose leader is already archived on this runtime.
-	activeSquadCount, err := h.Queries.CountActiveSquadsWithArchivedLeadersByRuntime(r.Context(), rt.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to check runtime squad dependencies")
-		return
-	}
-	if activeSquadCount > 0 {
-		writeError(w, http.StatusConflict, "cannot delete runtime: it has active squads led by archived agents. Archive those squads or assign them a new leader first.")
 		return
 	}
 
@@ -801,74 +896,53 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
 
-	// Pause autopilots pointing at the archived agents BEFORE we delete
-	// them. Migration 096 dropped the autopilot.assignee_id agent FK, so a
-	// hard-delete here would otherwise leave dangling rows that subsequent
-	// scheduler ticks would skip with "assignee agent no longer exists" —
-	// quiet, but burning a run record every tick until an operator notices.
-	// Pausing makes the breakage visible in the autopilot list so the owner
-	// can re-point or delete the row instead. This runs inside the teardown
-	// transaction so a pause that lands but is followed by a failed delete
-	// rolls back with everything else, matching ArchiveAgentsAndDeleteRuntime.
-	archivedAgentIDs, err := qtx.ListArchivedAgentIDsByRuntime(r.Context(), rt.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to enumerate archived agents")
+	// Revalidate under the runtime row lock. Agent/task inserts take a
+	// KEY SHARE lock through their runtime FK, so no active agent can appear
+	// after this check and then be silently unbound by the teardown.
+	if _, err := qtx.LockAgentRuntime(r.Context(), rt.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock runtime")
 		return
 	}
-	if len(archivedAgentIDs) > 0 {
-		if err := qtx.PauseAutopilotsByAgentAssignees(r.Context(), archivedAgentIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to pause autopilots")
+	if _, err := qtx.ListUserAgentsByRuntimeForUpdate(r.Context(), rt.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock runtime dependencies")
+		return
+	}
+	activeAgents, err = qtx.ListActiveAgentsByRuntimeForUpdate(r.Context(), rt.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check runtime dependencies")
+		return
+	}
+	if len(activeAgents) > 0 {
+		writeJSON(w, http.StatusConflict, h.runtimeHasActiveAgentsResponse(activeAgents))
+		return
+	}
+
+	// Same teardown the confirmed path runs: unbind the runtime's agents and
+	// their task history, cancel what was still active, remove only the system
+	// agents. There is no active agent here by definition, but archived ones and
+	// their history can still be bound to this runtime.
+	teardown, err := service.TeardownRuntime(r.Context(), qtx, rt.ID, service.RuntimeTeardownOptions{CancelNonTerminalTasks: true})
+	if err != nil {
+		if errors.Is(err, service.ErrRuntimeNotDrained) {
+			slog.Error("runtime delete aborted: tasks not drained",
+				"runtime_id", uuidToString(rt.ID), "error", err)
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "the runtime still has tasks in flight; retry in a moment.",
+				"code":  "runtime_delete_not_drained",
+			})
 			return
 		}
-	}
-
-	// Remove archived squads whose leader is an archived agent on this runtime
-	// so the RESTRICT FK on squad.leader_id won't block the subsequent agent
-	// deletion. Active squads are handled by the 409 guard above instead.
-	if err := qtx.DeleteSquadsByArchivedAgentsOnRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up squads referencing archived agents")
-		return
-	}
-
-	// Remove archived agents so the FK constraint (ON DELETE RESTRICT) won't block deletion.
-	// First drop their invocation targets — agent_invocation_target has no
-	// agent_id FK (MUL-3963), so cleanup is app-layer and MUST precede the
-	// agent hard-delete to avoid orphan rows.
-	if err := qtx.DeleteAgentInvocationTargetsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up agent invocation targets")
-		return
-	}
-	// Same app-layer cleanup for channel installations: channel_* has no
-	// workspace/agent FK (MUL-3515 §4), so an archived agent's bot installations
-	// would otherwise survive the hard-delete as orphans and keep occupying their
-	// (channel_type, app_id) routing slots, making those bots un-rebindable (#4810).
-	if err := qtx.DeleteChannelInstallationsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up channel installations")
-		return
-	}
-	if err := qtx.DeleteChatPinnedAgentsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up chat pins")
-		return
-	}
-	// agent_to_label has no agent_id FK, so clear the runtime's agents' label
-	// links before those agents are hard-deleted below; otherwise they survive
-	// as invisible orphan rows once resource labels are enabled.
-	if err := qtx.DeleteAgentLabelAssignmentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up agent label assignments")
-		return
-	}
-	// The agent deletes below cascade away these agents' chat_sessions, and
-	// chat_draft_restore has no FK to follow them (#5219). Prune first.
-	if err := pruneRuntimeAgentChatDraftRestores(r.Context(), qtx, rt.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up chat draft restores")
-		return
-	}
-	if err := qtx.DeleteArchivedAgentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up archived agents")
-		return
-	}
-	if err := qtx.DeleteSystemAgentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up system agents")
+		if errors.Is(err, service.ErrRuntimeWorkspaceMismatch) {
+			slog.Error("runtime delete aborted: agent workspace mismatch",
+				"runtime_id", uuidToString(rt.ID), "error", err)
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "the runtime has an invalid cross-workspace agent binding.",
+				"code":  "runtime_delete_workspace_mismatch",
+			})
+			return
+		}
+		slog.Error("runtime delete teardown failed", "runtime_id", uuidToString(rt.ID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete runtime")
 		return
 	}
 
@@ -881,18 +955,21 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("runtime deleted", "runtime_id", uuidToString(rt.ID), "deleted_by", userID)
+	slog.Info("runtime deleted",
+		"runtime_id", uuidToString(rt.ID),
+		"deleted_by", userID,
+		"agents_unbound", len(teardown.UnboundAgents),
+		"tasks_cancelled", len(teardown.CancelledTasks),
+		"autopilots_paused", len(teardown.PausedAutopilots),
+	)
 
-	// Notify frontend to refresh runtime list.
-	h.publish(protocol.EventDaemonRegister, wsID, "member", userID, map[string]any{
-		"action": "delete",
-	})
+	h.publishRuntimeTeardown(r.Context(), teardown, wsID, userID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // runtimeHasActiveAgentsResponse builds the structured 409 body shared by
-// DeleteAgentRuntime (light-mode block) and ArchiveAgentsAndDeleteRuntime
+// DeleteAgentRuntime (light-mode block) and UnbindAgentsAndDeleteRuntime
 // (cascade-plan-changed). The shape is:
 //
 //	{
@@ -909,36 +986,44 @@ func (h *Handler) runtimeHasActiveAgentsResponse(agents []db.Agent) map[string]a
 		resp[i] = h.agentToResponse(a)
 	}
 	return map[string]any{
-		"error":         "cannot delete runtime: it has active agents bound to it. Archive or reassign the agents first.",
+		"error":         "cannot delete runtime: it has active agents bound to it. Reassign them or confirm unbinding them first.",
 		"code":          "runtime_has_active_agents",
 		"active_agents": resp,
 	}
 }
 
-// archiveAgentsAndDeleteRuntimeRequest is the wire shape for the cascade
-// endpoint. expected_active_agent_ids is the snapshot the user just confirmed
-// in the dialog — the server compares it to the live set inside the
+// unbindAgentsAndDeleteRuntimeRequest is the wire shape for the confirmed
+// delete endpoint. expected_active_agent_ids is the snapshot the user just
+// confirmed in the dialog — the server compares it to the live set inside the
 // transaction and refuses with runtime_delete_plan_changed if anything moved
 // between dialog open and confirm. That guarantees the user is approving the
-// exact agent set that will be archived, even if a teammate adds or archives
-// an agent in the same window.
-type archiveAgentsAndDeleteRuntimeRequest struct {
+// exact agent set that will be unbound, even if a teammate adds or archives an
+// agent in the same window.
+//
+// The compared set is deliberately still "active agents on this runtime": it is
+// what installed clients send, and widening it would make every older client's
+// request mismatch and 409 forever, leaving the runtime undeletable. Extra
+// information for the dialog belongs in read-only fields, not in this set.
+type unbindAgentsAndDeleteRuntimeRequest struct {
 	ExpectedActiveAgentIDs []string `json:"expected_active_agent_ids"`
 }
 
-// ArchiveAgentsAndDeleteRuntime is the cascade entry point: archive every
-// agent currently bound to the runtime, cancel their queued/running tasks,
-// pause autopilots that target them, hard-delete the now-detached archived
-// rows so the agent.runtime_id FK no longer pins the runtime, and finally
-// delete the runtime row itself — all inside a single transaction so a
-// partial failure never leaves a runtime half-torn-down.
+// UnbindAgentsAndDeleteRuntime is the confirmed delete entry point: unbind every
+// user agent bound to the runtime, pause affected Autopilots, cancel active
+// tasks, detach task history, hard-delete only the system agents, and finally
+// delete the runtime row — all inside a single transaction so a partial failure
+// never leaves a runtime half-torn-down.
+//
+// Before MUL-5559 this archived those agents and then hard-deleted the rows,
+// destroying every conversation with them; the dialog said "archive", so what
+// the user agreed to was not what happened. Now nothing of the user's is
+// destroyed: the agents survive unbound and need a new runtime to run again.
 //
 // Transaction order follows the reference revoke flow in
-// revokeAndRemoveMember (workspace_revoke.go) so the two cascade paths share
-// the same race-safety properties: the dispatcher can't claim a task whose
-// runtime is about to vanish, autopilots can't fire onto a dead assignee,
-// and post-commit publish events emit the same task:cancelled →
-// agent:archived → daemon:register fan-out.
+// revokeAndRemoveMember (workspace_revoke.go) so the two paths share the same
+// race-safety properties: the dispatcher can't claim a task whose runtime is
+// about to vanish, and post-commit publish events emit the same
+// task:cancelled → agent:status/autopilot:updated → daemon:register fan-out.
 //
 // The expected_active_agent_ids check is the load-bearing piece for the UX:
 // the front-end snapshots the agent list when the dialog opens and presents
@@ -946,14 +1031,17 @@ type archiveAgentsAndDeleteRuntimeRequest struct {
 // while that dialog is open, this endpoint refuses with
 // runtime_delete_plan_changed and the latest list, so the user never confirms
 // a stale plan.
-func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Request) {
+//
+// Served at POST /api/runtimes/:id/unbind-agents-and-delete and, for installed
+// clients, the original /archive-agents-and-delete path.
+func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
 		return
 	}
 
-	var req archiveAgentsAndDeleteRuntimeRequest
+	var req unbindAgentsAndDeleteRuntimeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -964,7 +1052,7 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
+	rt, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "runtime not found")
 		return
@@ -1014,9 +1102,13 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 	// which conflicts with FOR UPDATE — so any concurrent INSERT or
 	// UPDATE that would point a new/moved agent at this runtime now
 	// blocks until our tx finishes. This is the "兜底" lock that keeps
-	// new actives from appearing between our snapshot and our archive.
+	// new actives from appearing between our snapshot and our unbind.
 	if _, err := qtx.LockAgentRuntime(r.Context(), rt.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock runtime")
+		return
+	}
+	if _, err := qtx.ListUserAgentsByRuntimeForUpdate(r.Context(), rt.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock runtime dependencies")
 		return
 	}
 
@@ -1026,7 +1118,7 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 	// set here closes the dialog-open / user-confirm race: even if a
 	// teammate creates or archives an agent on this runtime while the
 	// dialog was open, the user is approving exactly the set the server
-	// is about to archive.
+	// is about to unbind.
 	currentActive, err := qtx.ListActiveAgentsByRuntimeForUpdate(r.Context(), rt.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to enumerate active agents")
@@ -1045,107 +1137,27 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Build the agent ID list once — it's the explicit allowlist for the
-	// archive UPDATE below and the runtime-or-agent task cancel further
-	// down. By keying the archive off this list (not off runtime_id) we
-	// guarantee that agents not in the user's confirmed set can never
-	// be silently archived, even if the row-level locks above somehow
-	// missed something. Defense in depth.
-	currentActiveIDs := make([]pgtype.UUID, len(currentActive))
-	for i, a := range currentActive {
-		currentActiveIDs[i] = a.ID
-	}
-
-	// 1. Archive every active agent on this runtime, narrowed to the
-	//    user-confirmed expected_active_agent_ids set (which equals
-	//    currentActive at this point). Returns the affected rows so the
-	//    post-commit publish loop can fan out agent:archived per agent.
-	archivedAgents, err := qtx.ArchiveAgentsByIDs(r.Context(), db.ArchiveAgentsByIDsParams{
-		ArchivedBy: member.UserID,
-		AgentIds:   currentActiveIDs,
-	})
+	// Single teardown, shared with the light DELETE path: unbind every user
+	// agent (active and archived) plus their task history, cancel what was
+	// running or queued, and hard-delete only the system agents. Nothing the
+	// user configured is destroyed — the agents just need a new runtime.
+	teardown, err := service.TeardownRuntime(r.Context(), qtx, rt.ID, service.RuntimeTeardownOptions{CancelNonTerminalTasks: true})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to archive agents")
-		return
-	}
-
-	// 2. Cancel queued/dispatched/running tasks. Match by runtime_id AND
-	//    by archived agent ids: agent.runtime_id can be reassigned without
-	//    rewriting historical agent_task_queue rows, so an agent we just
-	//    archived may still own tasks pinned to a different runtime — and
-	//    ClaimAgentTask does not gate on agent.archived_at.
-	archivedIDs := make([]pgtype.UUID, len(archivedAgents))
-	for i, a := range archivedAgents {
-		archivedIDs[i] = a.ID
-	}
-	cancelledTasks, err := qtx.CancelAgentTasksByRuntimeOrAgent(r.Context(), db.CancelAgentTasksByRuntimeOrAgentParams{
-		RuntimeIds: []pgtype.UUID{rt.ID},
-		AgentIds:   archivedIDs,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to cancel tasks")
-		return
-	}
-
-	// 3. Pause autopilots whose assignee is one of the archived agents.
-	//    Snapshots the full archived set on this runtime — including any
-	//    that were already archived before this call — because the
-	//    DeleteArchivedAgentsByRuntime below will hard-delete the lot, and
-	//    a paused autopilot is much louder in the UI than a silently-
-	//    dangling assignee_id (see migration 096 for why the FK is gone).
-	allArchivedIDs, err := qtx.ListArchivedAgentIDsByRuntime(r.Context(), rt.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to enumerate archived agents")
-		return
-	}
-	if len(allArchivedIDs) > 0 {
-		if err := qtx.PauseAutopilotsByAgentAssignees(r.Context(), allArchivedIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to pause autopilots")
+		if errors.Is(err, service.ErrRuntimeNotDrained) {
+			slog.Error("runtime delete aborted: tasks not drained",
+				"runtime_id", uuidToString(rt.ID), "error", err)
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "the runtime still has tasks in flight; retry in a moment.",
+				"code":  "runtime_delete_not_drained",
+			})
 			return
 		}
-	}
-
-	// 4. Hard-delete the archived agents so the agent.runtime_id FK
-	//    (ON DELETE RESTRICT) no longer keeps the runtime alive.
-	if err := qtx.DeleteAgentInvocationTargetsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up agent invocation targets")
-		return
-	}
-	// Same app-layer cleanup for channel installations: channel_* has no
-	// workspace/agent FK (MUL-3515 §4), so an archived agent's bot installations
-	// would otherwise survive the hard-delete as orphans and keep occupying their
-	// (channel_type, app_id) routing slots, making those bots un-rebindable (#4810).
-	if err := qtx.DeleteChannelInstallationsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up channel installations")
-		return
-	}
-	if err := qtx.DeleteChatPinnedAgentsByArchivedRuntimeAgents(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up chat pins")
-		return
-	}
-	// agent_to_label has no agent_id FK, so clear the runtime's agents' label
-	// links before those agents are hard-deleted below; otherwise they survive
-	// as invisible orphan rows once resource labels are enabled.
-	if err := qtx.DeleteAgentLabelAssignmentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up agent label assignments")
-		return
-	}
-	// The agent deletes below cascade away these agents' chat_sessions, and
-	// chat_draft_restore has no FK to follow them (#5219). Prune first.
-	if err := pruneRuntimeAgentChatDraftRestores(r.Context(), qtx, rt.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up chat draft restores")
-		return
-	}
-	if err := qtx.DeleteArchivedAgentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up archived agents")
-		return
-	}
-	if err := qtx.DeleteSystemAgentsByRuntime(r.Context(), rt.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clean up system agents")
+		slog.Error("runtime delete teardown failed", "runtime_id", uuidToString(rt.ID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to unbind agents")
 		return
 	}
 
-	// 5. Finally delete the runtime row itself.
+	// Finally delete the runtime row itself.
 	if err := qtx.DeleteAgentRuntime(r.Context(), rt.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete runtime")
 		return
@@ -1156,39 +1168,32 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Post-commit fan-out — same ordering as publishRevocation so subscribers
-	// observe task:cancelled before agent:archived before the runtime list
-	// refresh, matching the order other revocation paths use.
-	if h.TaskService != nil && len(cancelledTasks) > 0 {
-		h.TaskService.BroadcastCancelledTasks(r.Context(), cancelledTasks)
-	}
-	for _, a := range archivedAgents {
-		h.publish(protocol.EventAgentArchived, wsID, "member", userID, map[string]any{
-			"agent": h.agentToResponse(a),
-		})
-	}
-	h.publish(protocol.EventDaemonRegister, wsID, "member", userID, map[string]any{
-		"action": "delete",
-	})
+	h.publishRuntimeTeardown(r.Context(), teardown, wsID, userID)
 
-	slog.Info("runtime deleted via cascade",
+	slog.Info("runtime deleted, agents unbound",
 		"runtime_id", uuidToString(rt.ID),
 		"deleted_by", userID,
-		"agents_archived", len(archivedAgents),
-		"tasks_cancelled", len(cancelledTasks),
+		"agents_unbound", len(teardown.UnboundAgents),
+		"tasks_cancelled", len(teardown.CancelledTasks),
+		"autopilots_paused", len(teardown.PausedAutopilots),
 	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "ok",
-		"agents_archived": len(archivedAgents),
-		"tasks_cancelled": len(cancelledTasks),
+		"status":            "ok",
+		"agents_unbound":    len(teardown.UnboundAgents),
+		"tasks_cancelled":   len(teardown.CancelledTasks),
+		"autopilots_paused": len(teardown.PausedAutopilots),
+		// Deprecated mirror of agents_unbound: installed clients built against
+		// the archive-and-delete contract read this key. The count is the same
+		// set of agents; they are no longer archived.
+		"agents_archived": len(teardown.UnboundAgents),
 	})
 }
 
 // parseExpectedActiveAgentIDs validates the cascade endpoint's
 // expected_active_agent_ids list. nil / empty is allowed (an empty set is a
 // valid plan: "I confirmed there are no active agents" — the cascade then
-// just deletes the runtime without archiving anything). Returns ok=false on
+// just deletes the runtime without unbinding an active agent). Returns ok=false on
 // any malformed UUID so the handler responds 400 instead of silently
 // matching a different set.
 func parseExpectedActiveAgentIDs(raw []string) (map[string]struct{}, bool) {

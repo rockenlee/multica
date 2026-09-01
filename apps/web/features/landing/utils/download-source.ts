@@ -58,8 +58,8 @@ export function originFromHeaders(headers: HeaderReader): string | null {
   return normalizeOrigin(`${proto}://${host}`);
 }
 
-export function githubReleasesApiUrl(repo: string): string {
-  return `https://api.github.com/repos/${repo}/releases?per_page=2`;
+export function githubReleasesApiUrl(repo: string, perPage = 5): string {
+  return `https://api.github.com/repos/${repo}/releases?per_page=${perPage}`;
 }
 
 export function githubReleasesUrl(repo: string): string {

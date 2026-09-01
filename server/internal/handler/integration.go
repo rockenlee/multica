@@ -559,8 +559,8 @@ func (h *Handler) UpsertIntegrationProjectBinding(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	project, err := h.Queries.GetProject(r.Context(), projectUUID)
-	if err != nil || uuidToString(project.WorkspaceID) != uuidToString(wsUUID) {
+	_, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{ID: projectUUID, WorkspaceID: wsUUID})
+	if err != nil {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
