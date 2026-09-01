@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { CalendarClock, CalendarDays, ChevronRight, Cloud, FolderOpen, Kanban, Maximize2, Minimize2, MoreHorizontal, Search, X as XIcon, UserMinus } from "lucide-react";
-import { useState, useRef } from "react";
-import { CalendarClock, CalendarDays, ChevronRight, FolderOpen, GitBranch, Maximize2, Minimize2, MoreHorizontal, Pencil, Search, X as XIcon, UserMinus } from "lucide-react";
+import { CalendarClock, CalendarDays, ChevronRight, Cloud, FolderOpen, GitBranch, Kanban, Maximize2, Minimize2, MoreHorizontal, Pencil, Search, X as XIcon, UserMinus } from "lucide-react";
 
 /**
  * GitHub mark — lucide-react v1 dropped brand icons, so we inline the
@@ -384,20 +382,12 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
     ) {
       resources.push({
         resource_type: "local_directory" as const,
-        resource_ref: {
-          local_path: selectedLocalPath,
-          daemon_id: daemonStatus.daemonId,
-          ...(selectedLocalLabel ? { label: selectedLocalLabel } : {}),
-      resources = [
-        {
-          resource_type: "local_directory" as const,
-          resource_ref: buildLocalDirectoryResourceRef({
-            localPath: selectedLocalPath,
-            daemonId: daemonStatus.daemonId,
-            label: selectedLocalLabel,
-            mode: effectiveLocalMode,
-          }),
-        },
+        resource_ref: buildLocalDirectoryResourceRef({
+          localPath: selectedLocalPath,
+          daemonId: daemonStatus.daemonId,
+          label: selectedLocalLabel,
+          mode: effectiveLocalMode,
+        }),
       });
     }
     // NetDisk / ZenDao resources are additive — attached regardless of the

@@ -1704,6 +1704,9 @@ export function IssueDisplayControls({
   allowGantt = false,
   dateFilter = null,
   onDateFilterChange,
+  issueSourceFilters: _issueSourceFilters = [],
+  onToggleIssueSourceFilter: _onToggleIssueSourceFilter,
+  onClearIssueSourceFilters: _onClearIssueSourceFilters,
   facetCountsExact = true,
   tableFacetCounts,
   onTableFacetChange,
@@ -1713,6 +1716,9 @@ export function IssueDisplayControls({
   hideViewToggle?: boolean;
   dateFilter?: IssueDateFilter | null;
   onDateFilterChange?: (filter: IssueDateFilter | null) => void;
+  issueSourceFilters?: Array<"gitlab" | "feishu" | "zentao">;
+  onToggleIssueSourceFilter?: (provider: "gitlab" | "feishu" | "zentao") => void;
+  onClearIssueSourceFilters?: () => void;
   /** Open saved view: menu marks the view's values checked-and-disabled;
    *  the trigger count only counts additions on top. */
   viewBaseline?: IssueViewBaseline;

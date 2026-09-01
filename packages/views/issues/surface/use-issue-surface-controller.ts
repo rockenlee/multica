@@ -226,25 +226,9 @@ export function useIssueSurfaceController({
   );
   const queryPlan = useMemo<IssueSurfaceQueryPlan>(() => {
     if (sourceSystems.length === 0) return baseQueryPlan;
-    const sourceFilter = { source_systems: sourceSystems };
-    if (baseQueryPlan.kind === "workspace") {
-      return {
-        ...baseQueryPlan,
-        queryFilter: { ...baseQueryPlan.queryFilter, ...sourceFilter },
-        groupedScopeFilter: {
-          ...baseQueryPlan.groupedScopeFilter,
-          ...sourceFilter,
-        },
-      };
-    }
     return {
       ...baseQueryPlan,
-      queryFilter: { ...baseQueryPlan.queryFilter, ...sourceFilter },
-      groupedScopeFilter: {
-        ...baseQueryPlan.groupedScopeFilter,
-        ...sourceFilter,
-      },
-      loadMoreFilter: { ...baseQueryPlan.loadMoreFilter, ...sourceFilter },
+      queryFilter: { ...baseQueryPlan.queryFilter, source_systems: sourceSystems },
     };
   }, [baseQueryPlan, sourceSystems]);
   const scopeKey = queryPlan.scopeKey;

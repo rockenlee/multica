@@ -49,7 +49,6 @@ import {
   integrationKeys,
 } from "@multica/core/integrations";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { useT } from "../../i18n";
 import {
   ConnectionStatusBadge,
   type ConnectionStatus,

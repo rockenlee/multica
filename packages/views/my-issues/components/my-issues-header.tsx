@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "zustand";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Settings2 } from "lucide-react";
@@ -8,8 +8,6 @@ import { toast } from "sonner";
 import { api } from "@multica/core/api";
 import { integrationsOptions, integrationKeys } from "@multica/core/integrations";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import {
   Popover,
@@ -47,10 +45,8 @@ import {
 import { cn } from "@multica/ui/lib/utils";
 import { PAGE_GUTTER } from "../../layout/page-header";
 import { FilterChipsBar } from "../../issues/components/filter-chips-bar";
-import { toast } from "sonner";
 import { SaveViewDialog, type SaveViewScope } from "../../issues/components/save-view-dialog";
 import { useActiveIssueView } from "@multica/core/issue-views/use-active-view";
-import { useWorkspaceId } from "@multica/core/hooks";
 import { baselineFromQuery } from "@multica/core/issue-views/baseline";
 import { ViewBar } from "../../issues/components/view-bar";
 import type { IssueView } from "@multica/core/api/schemas";
