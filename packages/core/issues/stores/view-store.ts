@@ -7,6 +7,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import type { IssueStatus, IssueStatusCategory, IssuePriority } from "../../types";
 import { createWorkspaceAwareStorage, registerForWorkspaceRehydration } from "../../platform/workspace-storage";
 import { defaultStorage } from "../../platform/storage";
+import type { IssueSyncProvider } from "../sync";
 
 export type ViewMode = "board" | "list" | "table" | "gantt" | "swimlane";
 export type GanttZoom = "day" | "week" | "month";
@@ -116,7 +117,7 @@ export interface ActorFilterValue {
   id: string;
 }
 
-/** The nine query-defining filter fields as one value — what a saved view
+/** The query-defining filter fields as one value — what a saved view
  *  fixes, and what resets restore. */
 export interface FilterSnapshot {
   statusFilters: IssueStatus[];
@@ -128,6 +129,7 @@ export interface FilterSnapshot {
   includeNoProject: boolean;
   labelFilters: string[];
   propertyFilters: Record<string, string[]>;
+  sourceFilters: IssueSyncProvider[];
 }
 
 /** Filter-bar chip dimensions. Date is excluded: `dateFilter` lives outside
@@ -139,6 +141,7 @@ export type FilterDimension =
   | "creator"
   | "project"
   | "label"
+  | "source"
   | `property:${string}`;
 
 export const PROPERTY_VIEW_PREFIX = "property:";
@@ -189,6 +192,8 @@ export interface IssueViewState {
   projectFilters: string[];
   includeNoProject: boolean;
   labelFilters: string[];
+  /** External issue-sync channel (GitLab / ZenTao / Lark). */
+  sourceFilters: IssueSyncProvider[];
   /**
    * Custom-property filters: definition id → selected option ids (checkbox
    * definitions use the pseudo-options "true"/"false"). Empty array = no
@@ -254,6 +259,7 @@ export interface IssueViewState {
   toggleProjectFilter: (projectId: string) => void;
   toggleNoProject: () => void;
   toggleLabelFilter: (labelId: string) => void;
+  toggleSourceFilter: (provider: IssueSyncProvider) => void;
   togglePropertyFilter: (propertyId: string, optionId: string) => void;
   /** Replace a property's full filter value set (used by scalar value inputs
    *  for text/number/date/url, which build the array including "__none__"). */
@@ -302,6 +308,7 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
   projectFilters: [],
   includeNoProject: false,
   labelFilters: [],
+  sourceFilters: [],
   propertyFilters: {},
   dateFilter: null,
   agentRunningFilter: false,
@@ -392,6 +399,12 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
         ? state.labelFilters.filter((id) => id !== labelId)
         : [...state.labelFilters, labelId],
     })),
+  toggleSourceFilter: (provider) =>
+    set((state) => ({
+      sourceFilters: state.sourceFilters.includes(provider)
+        ? state.sourceFilters.filter((item) => item !== provider)
+        : [...state.sourceFilters, provider],
+    })),
   togglePropertyFilter: (propertyId, optionId) =>
     set((state) => {
       const current = state.propertyFilters[propertyId] ?? [];
@@ -433,6 +446,7 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
       projectFilters: [],
       includeNoProject: false,
       labelFilters: [],
+      sourceFilters: [],
       propertyFilters: {},
       dateFilter: null,
       agentRunningFilter: false,
@@ -456,6 +470,8 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
           return { projectFilters: [], includeNoProject: false };
         case "label":
           return { labelFilters: [] };
+        case "source":
+          return { sourceFilters: [] };
         default: {
           const propertyId = propertyIdFromViewKey(dimension);
           if (!propertyId || !(propertyId in state.propertyFilters)) return state;
@@ -573,6 +589,7 @@ export const viewStorePersistOptions = (name: string) => ({
     includeNoProject: state.includeNoProject,
     labelFilters: state.labelFilters,
     propertyFilters: state.propertyFilters,
+    sourceFilters: state.sourceFilters,
     sortBy: state.sortBy,
     sortDirection: state.sortDirection,
     cardProperties: state.cardProperties,

@@ -16,7 +16,6 @@ import type {
 import { workspaceWorkingAgentsOptions } from "@multica/core/agents";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { ALL_STATUSES } from "@multica/core/issues/config";
-import type { IssueSyncProvider } from "@multica/core/issues";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { statusFilterColumns } from "@multica/core/issues";
 import { dateOnlyToLocalDate } from "@multica/core/issues/date";
@@ -65,7 +64,6 @@ interface UseIssueSurfaceControllerInput {
   search?: string;
 }
 
-const EMPTY_SOURCE_FILTERS: IssueSyncProvider[] = [];
 
 export interface IssueSurfaceController {
   scopeKey: string;
@@ -212,11 +210,7 @@ export function useIssueSurfaceController({
     () => buildIssueSurfaceQueryPlan(scope),
     [scope],
   );
-  const sourceFilters = useViewStore(
-    (state) =>
-      (state as typeof state & { sourceFilters?: IssueSyncProvider[] })
-        .sourceFilters ?? EMPTY_SOURCE_FILTERS,
-  );
+  const sourceFilters = useViewStore((state) => state.sourceFilters);
   const sourceSystems = useMemo(
     () =>
       sourceFilters.flatMap((provider) =>

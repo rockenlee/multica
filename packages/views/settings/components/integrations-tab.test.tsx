@@ -155,12 +155,15 @@ describe("Settings IntegrationsTab", () => {
     expect(new Set(shapes).size).toBe(shapes.length);
   });
 
-  it("hides Composio when the feature flag is on but the server reports 503", () => {
+  it("shows the Composio setup hint when the feature flag is on but the server reports 503", () => {
     composioErrorRef.current = new ApiError("unavailable", 503, "Service Unavailable");
 
     renderTab();
 
     expect(screen.queryByTestId("composio-tab")).toBeNull();
+    expect(screen.getByTestId("composio-unconfigured")).toBeInTheDocument();
+    expect(screen.getByText("Composio integration not enabled")).toBeInTheDocument();
+    expect(screen.getByText("COMPOSIO_API_KEY")).toBeInTheDocument();
   });
 
   it("hides the Git providers section when the deployment reports it unavailable", () => {

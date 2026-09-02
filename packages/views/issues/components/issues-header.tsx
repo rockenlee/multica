@@ -13,6 +13,7 @@ import {
   FolderKanban,
   FolderMinus,
   List,
+  RefreshCw,
   Rows3,
   SignalHigh,
   SlidersHorizontal,
@@ -60,6 +61,11 @@ import { Toggle } from "@multica/ui/components/ui/toggle";
 import {
   PRIORITY_DISPLAY_ORDER,
 } from "@multica/core/issues/config";
+import {
+  getIssueSourceProvider,
+  ISSUE_SYNC_PROVIDERS,
+  type IssueSyncProvider,
+} from "@multica/core/issues";
 import { StatusIcon, PriorityIcon } from ".";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -132,6 +138,12 @@ type LocalDateRange = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const ISSUE_SOURCE_LABEL_KEY: Record<IssueSyncProvider, "source_feishu" | "source_zentao" | "source_gitlab"> = {
+  feishu: "source_feishu",
+  zentao: "source_zentao",
+  gitlab: "source_gitlab",
+};
+
 function getActiveFilterCount(
   state: {
     statusFilters: string[];
@@ -143,6 +155,7 @@ function getActiveFilterCount(
     includeNoProject: boolean;
     labelFilters: string[];
     propertyFilters?: Record<string, string[]>;
+    sourceFilters?: IssueSyncProvider[];
     dateFilter?: IssueDateFilter | null;
   },
   // Inside a saved view only the user's additions on top of the view's own
@@ -164,6 +177,7 @@ function getActiveFilterCount(
     (state.includeNoProject && !(baseline?.includeNoProject ?? false));
   if (projectDelta) count++;
   if (delta(state.labelFilters, baseline?.label) > 0) count++;
+  if (delta(state.sourceFilters ?? [], baseline?.source) > 0) count++;
   for (const [id, selected] of Object.entries(state.propertyFilters ?? {})) {
     if (delta(selected, baseline?.property.get(id)) > 0) count++;
   }
@@ -199,11 +213,19 @@ function useIssueCounts(
     const creator = new Map<string, number>();
     const project = new Map<string, number>();
     const label = new Map<string, number>();
+    const source = new Map<IssueSyncProvider, number>();
     // property definition id → option key → count. Checkbox values count
     // under the "true"/"false" pseudo-option keys the filter store uses.
     const property = new Map<string, Map<string, number>>();
     let noAssignee = 0;
     let noProject = 0;
+
+    for (const issue of allIssues) {
+      const sourceProvider = getIssueSourceProvider(issue);
+      if (sourceProvider) {
+        source.set(sourceProvider, (source.get(sourceProvider) ?? 0) + 1);
+      }
+    }
 
     if (serverFacets) {
       for (const facet of serverFacets.facets) {
@@ -238,7 +260,7 @@ function useIssueCounts(
           }
         }
       }
-      return { status, priority, assignee, creator, noAssignee, project, noProject, label, property };
+      return { status, priority, assignee, creator, noAssignee, project, noProject, label, source, property };
     }
 
     for (const issue of allIssues) {
@@ -288,7 +310,7 @@ function useIssueCounts(
       }
     }
 
-    return { status, priority, assignee, creator, noAssignee, project, noProject, label, property };
+    return { status, priority, assignee, creator, noAssignee, project, noProject, label, source, property };
   }, [allIssues, serverFacets]);
 }
 
@@ -1323,6 +1345,7 @@ export function IssueFilterMenu({
   const includeNoProject = useViewStore((s) => s.includeNoProject);
   const labelFilters = useViewStore((s) => s.labelFilters);
   const propertyFilters = useViewStore((s) => s.propertyFilters);
+  const sourceFilters = useViewStore((s) => s.sourceFilters);
   const viewStoreApi = useViewStoreApi();
   const act = viewStoreApi.getState();
   const wsId = useWorkspaceId();
@@ -1356,6 +1379,7 @@ export function IssueFilterMenu({
         projectFilters,
         includeNoProject,
         labelFilters,
+        sourceFilters,
         dateFilter: showDateFilter ? dateFilter : null,
       },
       viewBaseline,
@@ -1515,6 +1539,43 @@ export function IssueFilterMenu({
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
+
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <RefreshCw className="size-3.5" />
+                <span className="flex-1">{t(($) => $.filters.section_channel_sync)}</span>
+                {sourceFilters.length > 0 && (
+                  <span className="text-caption text-primary font-medium">
+                    {sourceFilters.length}
+                  </span>
+                )}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-auto min-w-44">
+                {ISSUE_SYNC_PROVIDERS.map((provider) => {
+                  const checked = sourceFilters.includes(provider);
+                  const count = counts.source.get(provider) ?? 0;
+                  const fixed = viewBaseline?.source.has(provider) === true;
+                  return (
+                    <DropdownMenuCheckboxItem
+                      key={provider}
+                      checked={checked}
+                      disabled={fixed}
+                      title={fixed ? fixedTitle : undefined}
+                      onCheckedChange={() => act.toggleSourceFilter(provider)}
+                      className={FILTER_ITEM_CLASS}
+                    >
+                      <HoverCheck checked={checked} />
+                      {t(($) => $.sync[ISSUE_SOURCE_LABEL_KEY[provider]])}
+                      {count > 0 && (
+                        <span className="ml-auto text-caption text-muted-foreground">
+                          {t(($) => $.filters.issue_count, { count })}
+                        </span>
+                      )}
+                    </DropdownMenuCheckboxItem>
+                  );
+                })}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
 
             {/* Assignee */}
             <DropdownMenuSub

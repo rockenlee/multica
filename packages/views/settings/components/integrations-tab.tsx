@@ -92,15 +92,44 @@ export function IntegrationsTab() {
       <SettingsSection title={t(($) => $.enterprise_integrations.center_title)}>
         <IntegrationCenterOverview />
       </SettingsSection>
-      <SettingsSection title={t(($) => $.lark.section_title)}>
+      <SettingsSection
+        title={
+          <span className="flex items-center gap-2">
+            <IntegrationChannelIcon channel="lark" />
+            {t(($) => $.lark.section_title)}
+          </span>
+        }
+        description={t(($) => $.lark.page_description)}
+      >
         <LarkTab />
       </SettingsSection>
-      {composioEnabled && !composioUnconfigured && (
+      {composioEnabled && (
         <SettingsSection title={t(($) => $.composio.section_title)}>
-          <ComposioTab />
+          {composioUnconfigured ? (
+            <Card data-testid="composio-unconfigured">
+              <CardContent className="space-y-2">
+                <p className="text-body font-medium">{t(($) => $.composio.not_enabled_title)}</p>
+                <p className="text-caption text-muted-foreground">
+                  {t(($) => $.composio.not_enabled_description_prefix)}{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 text-micro">COMPOSIO_API_KEY</code>{" "}
+                  {t(($) => $.composio.not_enabled_description_suffix)}
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <ComposioTab />
+          )}
         </SettingsSection>
       )}
-      <SettingsSection title={t(($) => $.slack.section_title)}>
+      <SettingsSection
+        title={
+          <span className="flex items-center gap-2">
+            <IntegrationChannelIcon channel="slack" />
+            {t(($) => $.slack.section_title)}
+          </span>
+        }
+        description={t(($) => $.slack.page_description)}
+      >
         <SlackTab />
       </SettingsSection>
       {vcsAvailable && (

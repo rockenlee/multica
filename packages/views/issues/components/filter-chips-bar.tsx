@@ -8,6 +8,7 @@ import {
   CalendarDays,
   CircleDot,
   FolderKanban,
+  RefreshCw,
   SignalHigh,
   Tag,
   User,
@@ -28,6 +29,7 @@ import {
   type FilterSnapshot,
   type IssueDateFilter,
 } from "@multica/core/issues/stores/view-store";
+import type { IssueSyncProvider } from "@multica/core/issues";
 import {
   actorFilterKey,
   type IssueViewBaseline,
@@ -193,6 +195,7 @@ function useFilterChips(
   const includeNoProject = useViewStore((s) => s.includeNoProject);
   const labelFilters = useViewStore((s) => s.labelFilters);
   const propertyFilters = useViewStore((s) => s.propertyFilters);
+  const sourceFilters = useViewStore((s) => s.sourceFilters);
   const store = useViewStoreApi();
 
   const hasStoreFilters =
@@ -204,6 +207,7 @@ function useFilterChips(
     projectFilters.length > 0 ||
     includeNoProject ||
     labelFilters.length > 0 ||
+    sourceFilters.length > 0 ||
     Object.values(propertyFilters).some((selected) => selected.length > 0);
   const showDateChip = !!onDateFilterChange && !!dateFilter;
 
@@ -266,6 +270,7 @@ function useFilterChips(
       includeNoProject: s.includeNoProject,
       labelFilters: s.labelFilters,
       propertyFilters: s.propertyFilters,
+      sourceFilters: s.sourceFilters,
     };
     switch (dimension) {
       case "status":
@@ -293,6 +298,9 @@ function useFilterChips(
         break;
       case "label":
         s.resetFiltersTo({ ...current, labelFilters: raw.labelFilters });
+        break;
+      case "source":
+        s.resetFiltersTo({ ...current, sourceFilters: raw.sourceFilters });
         break;
       default: {
         const propertyId = dimension.slice("property:".length);
@@ -330,6 +338,9 @@ function useFilterChips(
   const deltaLabels = baseline
     ? labelFilters.filter((id) => !baseline.label.has(id))
     : labelFilters;
+  const deltaSources = baseline
+    ? sourceFilters.filter((provider) => !baseline.source.has(provider))
+    : sourceFilters;
   const deltaProperties: Record<string, string[]> = {};
   for (const [id, selected] of Object.entries(propertyFilters)) {
     const fixed = baseline?.property.get(id);
@@ -445,6 +456,20 @@ function useFilterChips(
       ),
       value: summarize(deltaLabels.map((id) => labelById.get(id)?.name)),
       onRemove: () => clearDimension("label"),
+    });
+  }
+  if (deltaSources.length > 0) {
+    const sourceLabel: Record<IssueSyncProvider, "source_feishu" | "source_zentao" | "source_gitlab"> = {
+      feishu: "source_feishu",
+      zentao: "source_zentao",
+      gitlab: "source_gitlab",
+    };
+    chips.push({
+      key: "source",
+      icon: <RefreshCw className={CHIP_ICON_CLASS} />,
+      label: t(($) => $.filters.section_channel_sync),
+      value: summarize(deltaSources.map((provider) => t(($) => $.sync[sourceLabel[provider]]))),
+      onRemove: () => clearDimension("source"),
     });
   }
   for (const [propertyId, selected] of Object.entries(deltaProperties)) {

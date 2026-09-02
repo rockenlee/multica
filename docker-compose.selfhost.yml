@@ -188,6 +188,12 @@ services:
       MULTICA_VCS_INTEGRATION_ENABLED: ${MULTICA_VCS_INTEGRATION_ENABLED:-true}
       # VCS integration at-rest encryption key for token-based providers
       MULTICA_VCS_SECRET_KEY: ${MULTICA_VCS_SECRET_KEY:-}
+      # Composio toolkit connections. Self-host turns the product flag on by
+      # default (cloud stays off). The UI still needs COMPOSIO_API_KEY.
+      FF_COMPOSIO_MCP_APPS: ${FF_COMPOSIO_MCP_APPS:-true}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      COMPOSIO_CALLBACK_BASE_URL: ${COMPOSIO_CALLBACK_BASE_URL:-}
+      COMPOSIO_STATE_SECRET: ${COMPOSIO_STATE_SECRET:-}
       # WeCom smart-bot integration. MULTICA_WECOM_SECRET_KEY is the
       # opt-in: unset = integration disabled. It encrypts each installation's
       # smart-bot secret at rest. The server needs it to unseal a bot's

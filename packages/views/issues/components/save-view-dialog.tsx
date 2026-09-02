@@ -593,6 +593,7 @@ export function SaveViewDialog({
         includeNoProject: state.includeNoProject,
         labelFilters: state.labelFilters,
         propertyFilters: state.propertyFilters,
+        sourceFilters: state.sourceFilters,
       },
       display: {
         // Personal display preference (like layout): saved as the view's

@@ -73,4 +73,24 @@ describe("saved view baseline", () => {
 
     expect([...baseline.status]).toEqual(["qa"]);
   });
+
+  it("keeps source filters so saved views can lock a channel", () => {
+    const baseline = baselineFromQuery({ sourceFilters: ["gitlab", "unknown", "feishu"] });
+
+    expect([...baseline.source]).toEqual(["gitlab", "feishu"]);
+    expect(baseline.raw.sourceFilters).toEqual(["gitlab", "feishu"]);
+  });
+});
+
+describe("source filters", () => {
+  it("toggles and clears like other filter dimensions", () => {
+    const store = createStore<IssueViewState>()((set) => viewStoreSlice(set));
+    store.getState().toggleSourceFilter("zentao");
+    store.getState().toggleSourceFilter("gitlab");
+    store.getState().toggleSourceFilter("zentao");
+    expect(store.getState().sourceFilters).toEqual(["gitlab"]);
+
+    store.getState().clearFilterDimension("source");
+    expect(store.getState().sourceFilters).toEqual([]);
+  });
 });

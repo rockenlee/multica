@@ -1,6 +1,7 @@
 import type { ActorFilterValue, FilterSnapshot } from "../issues/stores/view-store";
 import type { IssuePriority, IssueStatus } from "../types";
 import { PRIORITY_DISPLAY_ORDER } from "../issues/config";
+import { ISSUE_SYNC_PROVIDERS, type IssueSyncProvider } from "../issues/sync";
 
 /**
  * The open saved view's query, normalized for two jobs:
@@ -21,6 +22,7 @@ export interface IssueViewBaseline {
   project: Set<string>;
   includeNoProject: boolean;
   label: Set<string>;
+  source: Set<string>;
   /** Property definition id → fixed option ids. */
   property: Map<string, Set<string>>;
   /** Enum-sanitized snapshot, safe to hand straight to `resetFiltersTo`. */
@@ -62,6 +64,10 @@ export function baselineFromQuery(query: Record<string, unknown>): IssueViewBase
   const creatorFilters = actorArray(query.creatorFilters);
   const projectFilters = stringArray(query.projectFilters);
   const labelFilters = stringArray(query.labelFilters);
+  const sourceFilters = stringArray(query.sourceFilters).filter(
+    (provider): provider is IssueSyncProvider =>
+      (ISSUE_SYNC_PROVIDERS as readonly string[]).includes(provider),
+  );
   const includeNoAssignee = query.includeNoAssignee === true;
   const includeNoProject = query.includeNoProject === true;
 
@@ -88,6 +94,7 @@ export function baselineFromQuery(query: Record<string, unknown>): IssueViewBase
     project: new Set(projectFilters),
     includeNoProject,
     label: new Set(labelFilters),
+    source: new Set(sourceFilters),
     property,
     raw: {
       statusFilters,
@@ -99,6 +106,7 @@ export function baselineFromQuery(query: Record<string, unknown>): IssueViewBase
       includeNoProject,
       labelFilters,
       propertyFilters,
+      sourceFilters,
     },
   };
 }

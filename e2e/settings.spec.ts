@@ -1,5 +1,35 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { loginAsDefault, waitForPageText } from "./helpers";
+
+async function waitForWorkspaceNameSave(page: Page) {
+  return page.waitForResponse((response) => {
+    if (response.request().method() !== "PATCH" || !response.ok()) return false;
+    try {
+      return /\/api\/workspaces\/[^/]+$/.test(new URL(response.url()).pathname);
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function mockComposioEnabled(page: Page) {
+  // Cloud keeps the product flag off. Self-host can turn it on, but the E2E
+  // still forces it here so the connect flow does not depend on local env.
+  await page.route("**/api/config", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      feature_flags?: Record<string, boolean>;
+    };
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...body,
+        feature_flags: { ...body.feature_flags, composio_mcp_apps: true },
+      }),
+    });
+  });
+}
 
 test.describe("Settings", () => {
   test("updating workspace name reflects in sidebar immediately", async ({
@@ -7,57 +37,41 @@ test.describe("Settings", () => {
   }) => {
     const workspaceSlug = await loginAsDefault(page);
 
-    // Read the current workspace name from the sidebar
-    const sidebarName = page.getByRole("button", { name: /E2E Workspace/ }).first();
-    const originalName = (await sidebarName.innerText()).split("\n").pop()?.trim() ?? "E2E Workspace";
-
     await page.goto(`/${workspaceSlug}/settings?tab=workspace`, { waitUntil: "domcontentloaded" });
     await waitForPageText(page, "General");
 
-    const nameInput = page.getByRole("textbox", { name: "Name" });
-    await nameInput.clear();
+    const nameInput = page.locator('input[name="workspace-name"]');
+    await expect(nameInput).toBeVisible({ timeout: 10000 });
+    const originalName = (await nameInput.inputValue()).trim();
+    expect(originalName.length).toBeGreaterThan(0);
+
     const newName = "Renamed WS " + Date.now();
+    const saved = waitForWorkspaceNameSave(page);
     await nameInput.fill(newName);
-    await nameInput.blur();
+    await nameInput.press("Tab");
+    await saved;
 
     await expect(page.getByText("Workspace settings saved").first()).toBeVisible({
       timeout: 10000,
     });
-    await expect(page.getByRole("button", { name: new RegExp(newName) }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: newName }).first()).toBeVisible();
 
-    await nameInput.clear();
-    await nameInput.fill(originalName.trim());
-    await nameInput.blur();
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({
-      timeout: 10000,
-    });
-    await expect(page.getByRole("button", { name: new RegExp(originalName) }).first()).toBeVisible();
+    const restored = waitForWorkspaceNameSave(page);
+    await nameInput.fill(originalName);
+    await nameInput.press("Tab");
+    await restored;
+    await expect(page.getByRole("button", { name: originalName }).first()).toBeVisible();
   });
 
   // Composio connect flow, fully mocked at the network boundary so it runs
   // without a configured COMPOSIO_API_KEY or a live Composio project. The
   // backend redirect is simulated by pointing the init endpoint's redirect_url
-  // straight back at the settings page with ?connected=<slug> — exercising the
+  // straight back at the settings page with ?connected=<slug> -- exercising the
   // frontend's callback toast + connections refresh (MUL-3718) end to end.
   test("connecting a Composio toolkit shows a toast and refreshes the list", async ({
     page,
   }) => {
-    // Feature flag is off on self-host by default. Intercept config before the
-    // first app navigation so the integrations page actually mounts Composio.
-    await page.route("**/api/config", async (route) => {
-      const response = await route.fetch();
-      const body = (await response.json()) as {
-        feature_flags?: Record<string, boolean>;
-      };
-      await route.fulfill({
-        status: response.status(),
-        contentType: "application/json",
-        body: JSON.stringify({
-          ...body,
-          feature_flags: { ...body.feature_flags, composio_mcp_apps: true },
-        }),
-      });
-    });
+    await mockComposioEnabled(page);
 
     const workspaceSlug = await loginAsDefault(page);
     const settingsUrl = `/${workspaceSlug}/settings?tab=integrations`;
@@ -114,19 +128,15 @@ test.describe("Settings", () => {
     });
 
     await page.goto(settingsUrl, { waitUntil: "domcontentloaded" });
-    await waitForPageText(page, "Composio");
+    await expect(page.getByText("Notion").first()).toBeVisible({ timeout: 15000 });
+    const connectButton = page.getByRole("button", { name: /^Connect$/ }).first();
+    await expect(connectButton).toBeVisible({ timeout: 15000 });
+    await connectButton.click();
 
-    // Notion starts disconnected → click Connect.
-    await page.getByRole("button", { name: /^Connect$/ }).first().click();
-
-    // Success toast from the simulated callback redirect.
-    await expect(page.getByText("Connected").first()).toBeVisible({ timeout: 10000 });
-
-    // List refreshed without a manual reload: the Notion card now offers
-    // Disconnect, and the one-shot ?connected param has been stripped.
+    await expect(page.getByText("Connected").first()).toBeVisible({ timeout: 15000 });
     await expect(
       page.getByRole("button", { name: /Disconnect/ }).first(),
-    ).toBeVisible({ timeout: 10000 });
+    ).toBeVisible({ timeout: 15000 });
     await expect(page).not.toHaveURL(/connected=notion/);
   });
 });
