@@ -30,6 +30,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	agentpkg "github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -3735,6 +3736,7 @@ func (h *Handler) recordIssueStatusChangedActivity(ctx context.Context, issue db
 		actorType = "system"
 	}
 	if _, err := h.Queries.CreateActivity(ctx, db.CreateActivityParams{
+		ID:          dbid.NewV7(),
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     issue.ID,
 		ActorType:   pgtype.Text{String: actorType, Valid: true},

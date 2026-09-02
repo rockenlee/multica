@@ -26,6 +26,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/zentao"
 	"github.com/multica-ai/multica/server/internal/issueposition"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -1232,6 +1233,7 @@ func recordInboundStatusChangedActivity(ctx context.Context, qtx *db.Queries, is
 	}
 	raw, _ := json.Marshal(details)
 	_, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
+		ID:          dbid.NewV7(),
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     issue.ID,
 		ActorType:   pgtype.Text{String: "system", Valid: true},

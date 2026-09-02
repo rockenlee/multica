@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
 // stubLookPath swaps the package-level lookPath indirection used by
@@ -158,14 +160,17 @@ func TestRegisterRuntimes_VersionProbeTimeoutIsPerRuntime(t *testing.T) {
 		checkAgentMinVersion = origCheck
 	})
 
-	detectAgentVersion = func(ctx context.Context, path string) (string, error) {
-		switch path {
-		case "/test/hung-agent":
-			<-ctx.Done()
-			return "", ctx.Err()
-		case "/test/hung-profile":
-			<-ctx.Done()
-			return "", ctx.Err()
+	detectAgentVersion = func(ctx context.Context, runtimeCmd agent.Command) (string, error) {
+		switch runtimeCmd.Path {
+		case "/test/hung-agent", "/test/hung-profile":
+			timer := time.NewTimer(25 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-timer.C:
+				return "", context.DeadlineExceeded
+			}
 		case "/test/healthy-agent":
 			return "9.9.9", nil
 		default:
@@ -184,14 +189,13 @@ func TestRegisterRuntimes_VersionProbeTimeoutIsPerRuntime(t *testing.T) {
 		Enabled:        true,
 	}}, http.StatusOK)
 	d := fx.daemon
-	d.versionProbeTimeout = 25 * time.Millisecond
 	d.cfg.Agents = map[string]AgentEntry{
 		"openclaw": {Path: "/test/hung-agent"},
 		"codex":    {Path: "/test/healthy-agent"},
 	}
 
 	startedAt := time.Now()
-	resp, _, err := d.registerRuntimesForWorkspace(context.Background(), "ws-1")
+	resp, _, _, err := d.registerRuntimesForWorkspaceLocked(context.Background(), "ws-1")
 	if err != nil {
 		t.Fatalf("registerRuntimesForWorkspace: %v", err)
 	}

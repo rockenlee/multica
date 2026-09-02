@@ -276,6 +276,24 @@ var concurrentIndexCleanups = map[string]string{
 	"440_github_pr_head_sha_index":                              "idx_github_pull_request_head_sha",
 	"443_issue_project_status_index":                            "idx_issue_project_status",
 	"445_comment_delegated_failure_unsettled_index":             "idx_comment_delegated_failure_unsettled",
+	"455_integration_connection_workspace_index":                "idx_integration_connection_workspace",
+	"456_integration_user_account_user_index":                   "idx_integration_user_account_user",
+	"457_integration_user_account_connection_index":             "idx_integration_user_account_connection",
+	"458_integration_project_binding_workspace_index":           "idx_integration_project_binding_workspace",
+	"459_integration_sync_event_workspace_index":                "idx_integration_sync_event_workspace",
+	"460_integration_sync_event_connection_index":               "idx_integration_sync_event_connection",
+	"461_integration_sync_event_provider_status_index":          "idx_integration_sync_event_provider_status",
+	"462_integration_user_account_identity_index":               "idx_integration_user_account_connection_user_account",
+	"463_integration_issue_sync_setting_user_index":             "idx_integration_issue_sync_setting_user",
+	"464_issue_external_source_index":                           "idx_issue_external_source_unique",
+	"465_workspace_resource_workspace_index":                    "idx_workspace_resource_workspace",
+	"466_workspace_resource_created_by_index":                   "idx_workspace_resource_created_by",
+	"467_integration_issue_tombstone_project_index":             "idx_integration_issue_tombstone_project",
+	"469_issue_external_source_scoped_index":                    "idx_issue_external_source_unique",
+	"470_agent_run_workspace_status_index":                      "idx_agent_run_workspace_status",
+	"471_agent_run_issue_updated_index":                         "idx_agent_run_issue_updated",
+	"472_agent_run_active_issue_index":                          "idx_agent_run_one_active_per_issue",
+	"473_agent_task_idempotency_key_index":                      "idx_agent_task_idempotency_key",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
@@ -299,6 +317,7 @@ var concurrentDownIndexCleanups = map[string]string{
 	"375_drop_issue_last_activity_index":                    "idx_issue_workspace_last_activity",
 	"391_drop_agent_task_queue_dispatched_prepare_index":    "idx_agent_task_queue_dispatched_prepare",
 	"437_drop_agent_runtime_last_seen_at_index":             "idx_agent_runtime_last_seen_at",
+	"468_issue_external_source_unscoped_index_drop":         "idx_issue_external_source_unique",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {
