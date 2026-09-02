@@ -1,5 +1,6 @@
 # --- Build stage ---
 FROM golang:1.26-alpine AS builder
+ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git
 
